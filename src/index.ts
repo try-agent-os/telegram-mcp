@@ -1,8 +1,11 @@
 import 'dotenv/config';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
-import { z } from 'zod';
 import { initDb } from './db.js';
 import { createBot, onIncomingMessage } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
@@ -10,58 +13,46 @@ import type { Bot } from 'grammy';
 
 const PORT = parseInt(process.env.PORT ?? '3848', 10);
 
-function createMcpServer(bot: Bot): McpServer {
-  const server = new McpServer(
+// Track active MCP server instances for channel push
+const activeSessions = new Map<string, Server>();
+
+function createMcpServer(bot: Bot): Server {
+  const server = new Server(
     { name: 'telegram', version: '0.1.0' },
-    { capabilities: {} },
+    {
+      capabilities: {
+        tools: {},
+        experimental: {
+          'claude/channel': {},
+        },
+      },
+    },
   );
 
-  for (const tool of getToolDefinitions()) {
-    const zodShape: Record<string, z.ZodTypeAny> = {};
-    const props = tool.inputSchema.properties ?? {};
-    const required = new Set(tool.inputSchema.required ?? []);
+  const toolDefs = getToolDefinitions();
 
-    for (const [key, prop] of Object.entries(props) as [string, { type: string; description?: string; enum?: string[] }][]) {
-      let field: z.ZodTypeAny;
-      switch (prop.type) {
-        case 'number':
-        case 'integer':
-          field = z.number();
-          break;
-        case 'boolean':
-          field = z.boolean();
-          break;
-        case 'array':
-          field = z.array(z.string());
-          break;
-        default:
-          field = prop.enum ? z.enum(prop.enum as [string, ...string[]]) : z.string();
-      }
-      if (prop.description) {
-        field = field.describe(prop.description);
-      }
-      zodShape[key] = required.has(key) ? field : field.optional();
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: toolDefs.map(t => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    })),
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      const result = await handleToolCall(bot, name, args ?? {});
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
     }
-
-    server.tool(
-      tool.name,
-      tool.description,
-      zodShape,
-      async (args: Record<string, unknown>) => {
-        try {
-          const result = await handleToolCall(bot, tool.name, args);
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        } catch (err) {
-          return {
-            content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }],
-            isError: true,
-          };
-        }
-      },
-    );
-  }
+  });
 
   return server;
 }
@@ -80,10 +71,31 @@ async function main() {
   // Create grammY bot
   const bot = createBot(token);
 
-  // Handle incoming Telegram messages
+  // Handle incoming Telegram messages — push to all connected Claude sessions
   onIncomingMessage((chatId, text, username, displayName, messageId) => {
     const from = username ? `@${username}` : displayName ?? 'Unknown';
     console.log(`[Telegram] ${from} (chat ${chatId}, msg ${messageId}):\n> ${text}`);
+
+    // Push via claude/channel notification to all connected sessions
+    for (const [sid, server] of activeSessions) {
+      try {
+        server.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: text,
+            meta: {
+              chat_id: String(chatId),
+              message_id: String(messageId),
+              user: username ?? String(chatId),
+              user_id: String(chatId),
+              ts: new Date().toISOString(),
+            },
+          },
+        });
+      } catch (err) {
+        console.error(`[channel] Failed to push to session ${sid}:`, (err as Error).message);
+      }
+    }
   });
 
   // Express app with SSE transport
@@ -101,9 +113,11 @@ async function main() {
     transport.onclose = () => {
       console.log(`[disconnect] session=${sessionId}`);
       transports.delete(sessionId);
+      activeSessions.delete(sessionId);
     };
 
     const server = createMcpServer(bot);
+    activeSessions.set(sessionId, server);
     await server.connect(transport);
   });
 
@@ -148,6 +162,7 @@ async function main() {
       try { await transport.close(); } catch { /* ignore */ }
     }
     transports.clear();
+    activeSessions.clear();
     httpServer.close();
     await bot.stop();
     process.exit(0);
