@@ -6,12 +6,27 @@ import { checkAccess } from './access.js';
 import { saveMessage } from './db.js';
 import type { IncomingMessageEvent, MediaType } from './types.js';
 
+export interface ReactionEvent {
+  chatId: number;
+  messageId: number;
+  emoji: string;
+  action: 'added' | 'removed';
+  username: string | null;
+  displayName: string | null;
+  userId: number | null;
+}
+
 const MEDIA_DIR = '/tmp/telegram-mcp';
 
 let messageCallback: ((event: IncomingMessageEvent) => void) | null = null;
+let reactionCallback: ((event: ReactionEvent) => void) | null = null;
 
 export function onIncomingMessage(cb: typeof messageCallback): void {
   messageCallback = cb;
+}
+
+export function onReaction(cb: typeof reactionCallback): void {
+  reactionCallback = cb;
 }
 
 function ensureMediaDir(): void {
@@ -362,6 +377,51 @@ export function createBot(token: string): Bot {
       mediaType: 'sticker', filePath: null, fileName: null,
       isForward, forwardFrom, caption: null,
     });
+  });
+
+  // Reaction updates (Bot API 7.0+)
+  bot.on('message_reaction', async (ctx) => {
+    const update = ctx.messageReaction;
+    const chatId = update.chat.id;
+    const messageId = update.message_id;
+    const user = update.user;
+    const userId = user?.id ?? null;
+    const username = user?.username ?? null;
+    const displayName = user
+      ? [user.first_name, user.last_name].filter(Boolean).join(' ') || null
+      : null;
+
+    // Skip if user not in allowlist (anonymous reactions have no user)
+    if (userId !== null) {
+      const access = checkAccess(userId);
+      if (access === 'denied') return;
+    }
+
+    if (!reactionCallback) return;
+
+    // Report added reactions (emojis in new_reaction but not in old_reaction)
+    const oldEmojis = new Set(
+      (update.old_reaction ?? [])
+        .filter(r => r.type === 'emoji')
+        .map(r => (r as { type: 'emoji'; emoji: string }).emoji)
+    );
+    const newEmojis = (update.new_reaction ?? [])
+      .filter(r => r.type === 'emoji')
+      .map(r => (r as { type: 'emoji'; emoji: string }).emoji);
+
+    for (const emoji of newEmojis) {
+      if (!oldEmojis.has(emoji)) {
+        reactionCallback({ chatId, messageId, emoji, action: 'added', username, displayName, userId });
+      }
+    }
+
+    // Report removed reactions
+    const newEmojiSet = new Set(newEmojis);
+    for (const emoji of oldEmojis) {
+      if (!newEmojiSet.has(emoji)) {
+        reactionCallback({ chatId, messageId, emoji, action: 'removed', username, displayName, userId });
+      }
+    }
   });
 
   bot.catch((err) => {

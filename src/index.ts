@@ -7,7 +7,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import { initDb } from './db.js';
-import { createBot, onIncomingMessage } from './bot.js';
+import { createBot, onIncomingMessage, onReaction } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import type { Bot } from 'grammy';
 
@@ -111,6 +111,37 @@ async function main() {
     }
   });
 
+  // Handle incoming reactions — push to all connected Claude sessions
+  onReaction((event) => {
+    const { chatId, messageId, emoji, action, username, displayName } = event;
+    const from = username ? `@${username}` : displayName ?? 'Unknown';
+    console.log(`[Telegram] ${from} ${action === 'added' ? 'поставил' : 'убрал'} реакцию ${emoji} на msg ${messageId} в чате ${chatId}`);
+
+    const content = `[reaction: ${emoji}] на message_id=${messageId}`;
+
+    for (const [sid, server] of activeSessions) {
+      try {
+        server.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content,
+            meta: {
+              chat_id: String(chatId),
+              message_id: String(messageId),
+              reaction: emoji,
+              reaction_action: action,
+              user: username ?? String(chatId),
+              user_id: event.userId ? String(event.userId) : String(chatId),
+              ts: new Date().toISOString(),
+            },
+          },
+        });
+      } catch (err) {
+        console.error(`[channel] Failed to push reaction to session ${sid}:`, (err as Error).message);
+      }
+    }
+  });
+
   // Express app with SSE transport
   const app = express();
   app.use(express.json());
@@ -163,6 +194,7 @@ async function main() {
 
   // Start bot (non-blocking)
   bot.start({
+    allowed_updates: ['message', 'message_reaction'],
     onStart: () => console.log('[telegram-mcp] Bot started, listening for messages...'),
   }).catch((err) => {
     console.error('[telegram-mcp] Bot polling error:', (err as Error).message);
