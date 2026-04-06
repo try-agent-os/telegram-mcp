@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import type { TelegramMessage, ChatInfo } from './types.js';
+import type { TelegramMessage, ChatInfo, MediaType } from './types.js';
 
 const DB_PATH = path.join(process.cwd(), 'messages.db');
 
@@ -43,17 +43,31 @@ export function initDb(): void {
       INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.id, old.text);
     END;
   `);
+
+  // Migrate: add media columns if not present
+  const cols = db.pragma('table_info(messages)') as { name: string }[];
+  const colNames = cols.map(c => c.name);
+  if (!colNames.includes('media_type')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN media_type TEXT`);
+  }
+  if (!colNames.includes('file_path')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN file_path TEXT`);
+  }
+  if (!colNames.includes('file_name')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN file_name TEXT`);
+  }
 }
 
 export function saveMessage(msg: Omit<TelegramMessage, 'id' | 'created_at'>): TelegramMessage {
   const stmt = db.prepare(`
-    INSERT INTO messages (telegram_message_id, chat_id, user_id, username, display_name, text, direction, reply_to_message_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (telegram_message_id, chat_id, user_id, username, display_name, text, direction, reply_to_message_id, media_type, file_path, file_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = stmt.run(
     msg.telegram_message_id, msg.chat_id, msg.user_id,
     msg.username, msg.display_name, msg.text,
-    msg.direction, msg.reply_to_message_id
+    msg.direction, msg.reply_to_message_id,
+    msg.media_type ?? null, msg.file_path ?? null, msg.file_name ?? null
   );
   return { ...msg, id: result.lastInsertRowid as number, created_at: new Date().toISOString() };
 }

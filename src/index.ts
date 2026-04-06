@@ -72,15 +72,18 @@ async function main() {
   const bot = createBot(token);
 
   // Handle incoming Telegram messages — push to all connected Claude sessions
-  onIncomingMessage((chatId, text, username, displayName, messageId, replyToMessageId) => {
+  onIncomingMessage((event) => {
+    const { chatId, text, username, displayName, messageId, replyToMessageId, mediaType, isForward, forwardFrom } = event;
     const from = username ? `@${username}` : displayName ?? 'Unknown';
     const replyInfo = replyToMessageId ? ` [reply to msg ${replyToMessageId}]` : '';
-    console.log(`[Telegram] ${from} (chat ${chatId}, msg ${messageId}${replyInfo}):\n> ${text}`);
+    const typeInfo = mediaType ? ` [${mediaType}]` : '';
+    const fwdInfo = isForward && forwardFrom ? ` [fwd from: ${forwardFrom}]` : '';
+    console.log(`[Telegram] ${from}${typeInfo}${fwdInfo} (chat ${chatId}, msg ${messageId}${replyInfo}):\n> ${text}`);
 
-    // Build content with reply context
-    const content = replyToMessageId
-      ? `[reply to msg_id=${replyToMessageId}] ${text}`
-      : text;
+    // Build content with reply/forward context
+    let content = text;
+    if (replyToMessageId) content = `[reply to msg_id=${replyToMessageId}] ${content}`;
+    if (isForward && forwardFrom) content = `[forwarded from ${forwardFrom}] ${content}`;
 
     // Push via claude/channel notification to all connected sessions
     for (const [sid, server] of activeSessions) {
@@ -95,6 +98,9 @@ async function main() {
               reply_to_message_id: replyToMessageId ? String(replyToMessageId) : '',
               user: username ?? String(chatId),
               user_id: String(chatId),
+              media_type: mediaType ?? '',
+              is_forward: isForward ? 'true' : 'false',
+              forward_from: forwardFrom ?? '',
               ts: new Date().toISOString(),
             },
           },
