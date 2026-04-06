@@ -145,9 +145,6 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         text,
         direction: 'out',
         reply_to_message_id: reply_to_message_id ?? null,
-        media_type: null,
-        file_path: null,
-        file_name: null,
       });
       return { message_id: sent.message_id, chat_id, date: new Date(sent.date * 1000).toISOString() };
     }
@@ -168,9 +165,6 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         text,
         direction: 'out',
         reply_to_message_id: lastMsgId,
-        media_type: null,
-        file_path: null,
-        file_name: null,
       });
       return { message_id: sent.message_id };
     }
