@@ -16,6 +16,15 @@ const PORT = parseInt(process.env.PORT ?? '3848', 10);
 // Track active MCP server instances for channel push
 const activeSessions = new Map<string, Server>();
 
+function getLisbonTime(): string {
+  return new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Lisbon',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date()) + ' Europe/Lisbon';
+}
+
 function createMcpServer(bot: Bot): Server {
   const server = new Server(
     { name: 'telegram', version: '0.1.0' },
@@ -102,6 +111,7 @@ async function main() {
               is_forward: isForward ? 'true' : 'false',
               forward_from: forwardFrom ?? '',
               ts: new Date().toISOString(),
+              local_time: getLisbonTime(),
             },
           },
         });
@@ -133,6 +143,7 @@ async function main() {
               user: username ?? String(chatId),
               user_id: event.userId ? String(event.userId) : String(chatId),
               ts: new Date().toISOString(),
+              local_time: getLisbonTime(),
             },
           },
         });
