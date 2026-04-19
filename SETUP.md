@@ -6,9 +6,18 @@
 - `cmake` — needed to build whisper.cpp for local voice transcription
   - macOS: `brew install cmake`
   - Debian/Ubuntu: `sudo apt install cmake build-essential`
-- `ffmpeg` — used by whisper.cpp to convert OGG Opus voice messages to WAV
+- `ffmpeg` — used by whisper.cpp to convert OGG Opus voice messages to WAV, and for extracting audio from videos
   - macOS: `brew install ffmpeg`
   - Debian/Ubuntu: `sudo apt install ffmpeg`
+- `yt-dlp` — downloads audio from URLs (YouTube, Instagram, TikTok, etc.) for transcription
+  - macOS: `brew install yt-dlp`
+  - Debian/Ubuntu: `sudo apt install yt-dlp` (or `pip install yt-dlp`)
+- `pdftotext` (from poppler) — extracts text from PDF documents
+  - macOS: `brew install poppler`
+  - Debian/Ubuntu: `sudo apt install poppler-utils`
+- `tesseract` + language packs — OCR for photos with text (Russian + English by default)
+  - macOS: `brew install tesseract tesseract-lang`
+  - Debian/Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng`
 
 ## Install
 

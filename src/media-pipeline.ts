@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync, readdirSync, unlinkSync } from 'fs';
+import { mkdirSync, readdirSync, readFileSync, unlinkSync } from 'fs';
+import { randomUUID } from 'crypto';
 import path from 'path';
 import { nodewhisper } from 'nodejs-whisper';
 
@@ -116,6 +117,72 @@ function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return m > 0 ? `${m}m${s.toString().padStart(2, '0')}s` : `${s}s`;
+}
+
+const PDF_MAX_CHARS = 10000;
+const PDF_MIN_CHARS = 50;
+
+export async function processDocument(filePath: string, fileName: string): Promise<string | null> {
+  if (!fileName.toLowerCase().endsWith('.pdf')) return null;
+  try {
+    const { stdout } = await execFileP('pdftotext', ['-enc', 'UTF-8', filePath, '-'], {
+      timeout: 30000,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const text = stdout.trim();
+    if (text.length < PDF_MIN_CHARS) return null;
+    const truncated = text.length > PDF_MAX_CHARS
+      ? `${text.slice(0, PDF_MAX_CHARS)}\n[...text truncated, ${text.length - PDF_MAX_CHARS} more chars]`
+      : text;
+    return `[PDF: ${fileName}]\n\n${truncated}`;
+  } catch (err) {
+    console.error('[pdftotext] error:', (err as Error).message);
+    return null;
+  }
+}
+
+const OCR_MIN_CHARS = 20;
+
+export async function processPhoto(filePath: string): Promise<string | null> {
+  const tempBase = path.join(MEDIA_DIR, `tess-${randomUUID()}`);
+  try {
+    ensureMediaDir();
+    await execFileP('tesseract', [filePath, tempBase, '-l', 'rus+eng', '--psm', '1'], {
+      timeout: 30000,
+    });
+    const text = readFileSync(`${tempBase}.txt`, 'utf8').trim();
+    if (text.length < OCR_MIN_CHARS) return null;
+    return `[Text on photo]:\n${text}`;
+  } catch (err) {
+    console.error('[tesseract] error:', (err as Error).message);
+    return null;
+  } finally {
+    try { unlinkSync(`${tempBase}.txt`); } catch { /* ignore */ }
+  }
+}
+
+export async function processVideo(filePath: string, messageId: number): Promise<string | null> {
+  ensureMediaDir();
+  const audioPath = path.join(MEDIA_DIR, `vid_${messageId}.wav`);
+  try {
+    await execFileP('ffmpeg', [
+      '-y',
+      '-i', filePath,
+      '-vn',
+      '-ar', '16000',
+      '-ac', '1',
+      '-f', 'wav',
+      audioPath,
+    ], { timeout: 120000 });
+
+    const text = await transcribeAudio(audioPath);
+    return text ? `[video transcription] ${text}` : null;
+  } catch (err) {
+    console.error('[video] extraction error:', (err as Error).message);
+    return null;
+  } finally {
+    try { unlinkSync(audioPath); } catch { /* ignore */ }
+  }
 }
 
 export async function processUrl(url: string, messageId: number): Promise<string | null> {
