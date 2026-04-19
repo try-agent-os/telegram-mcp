@@ -19,20 +19,18 @@ const activeSessions = new Map<string, Server>();
 
 function getLocalISO(tz: string): string {
   const now = new Date();
-  const local = new Intl.DateTimeFormat('en-CA', {
+  const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz,
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false,
+    timeZoneName: 'longOffset',
   }).formatToParts(now);
-  const p = (type: string) => local.find(p => p.type === type)!.value;
-  const utcMs = now.getTime();
-  const localMs = new Date(now.toLocaleString('en-US', { timeZone: tz })).getTime();
-  const offsetMin = (localMs - utcMs) / 60000;
-  const sign = offsetMin >= 0 ? '+' : '-';
-  const absH = String(Math.floor(Math.abs(offsetMin) / 60)).padStart(2, '0');
-  const absM = String(Math.abs(offsetMin) % 60).padStart(2, '0');
-  return `${p('year')}-${p('month')}-${p('day')}T${p('hour')}:${p('minute')}:${p('second')}${sign}${absH}:${absM}`;
+  const p = (type: string) => parts.find(p => p.type === type)!.value;
+  // timeZoneName: 'longOffset' gives "GMT+01:00" or "GMT"
+  const gmtOffset = parts.find(p => p.type === 'timeZoneName')?.value ?? 'GMT';
+  const offset = gmtOffset === 'GMT' ? '+00:00' : gmtOffset.replace('GMT', '');
+  return `${p('year')}-${p('month')}-${p('day')}T${p('hour')}:${p('minute')}:${p('second')}${offset}`;
 }
 
 function createMcpServer(bot: Bot): Server {
@@ -221,7 +219,7 @@ async function main() {
 
   // Start bot (non-blocking)
   bot.start({
-    allowed_updates: ['message', 'message_reaction'],
+    allowed_updates: ['message', 'message_reaction', 'callback_query'],
     onStart: () => console.log('[telegram-mcp] Bot started, listening for messages...'),
   }).catch((err) => {
     console.error('[telegram-mcp] Bot polling error:', (err as Error).message);

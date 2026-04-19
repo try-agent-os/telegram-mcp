@@ -1,8 +1,11 @@
 import Database from 'better-sqlite3';
+import fs from 'fs';
 import path from 'path';
-import type { TelegramMessage, ChatInfo, MediaType } from './types.js';
+import type { TelegramMessage, ChatInfo, MediaType, UserRecord, AccessPolicy } from './types.js';
 
 const DB_PATH = path.join(process.cwd(), 'messages.db');
+const ACCESS_JSON_PATH = path.join(process.cwd(), 'access.json');
+const DEFAULT_TIMEZONE = 'Europe/Lisbon';
 
 let db: Database.Database;
 
@@ -42,6 +45,21 @@ export function initDb(): void {
     CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
       INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.id, old.text);
     END;
+
+    CREATE TABLE IF NOT EXISTS users (
+      user_id INTEGER PRIMARY KEY,
+      username TEXT,
+      display_name TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('allowed', 'pending', 'denied')),
+      timezone TEXT DEFAULT '${DEFAULT_TIMEZONE}',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 
   // Migrate: add media columns if not present
@@ -56,7 +74,49 @@ export function initDb(): void {
   if (!colNames.includes('file_name')) {
     db.exec(`ALTER TABLE messages ADD COLUMN file_name TEXT`);
   }
+
+  // Insert default settings if missing
+  db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('default_policy', 'pending')`).run();
+
+  // Migrate from access.json if it exists and users table is empty
+  migrateFromAccessJson();
 }
+
+function migrateFromAccessJson(): void {
+  const userCount = (db.prepare('SELECT COUNT(*) as cnt FROM users').get() as { cnt: number }).cnt;
+  if (userCount > 0) return;
+  if (!fs.existsSync(ACCESS_JSON_PATH)) return;
+
+  try {
+    const policy: AccessPolicy = JSON.parse(fs.readFileSync(ACCESS_JSON_PATH, 'utf-8'));
+    const insert = db.prepare('INSERT OR IGNORE INTO users (user_id, status, timezone) VALUES (?, ?, ?)');
+
+    const tx = db.transaction(() => {
+      for (const uid of policy.allowlist ?? []) {
+        const tz = policy.timezones?.[String(uid)] ?? DEFAULT_TIMEZONE;
+        insert.run(uid, 'allowed', tz);
+      }
+      for (const uid of policy.pending ?? []) {
+        insert.run(uid, 'pending', DEFAULT_TIMEZONE);
+      }
+      for (const uid of policy.denied ?? []) {
+        insert.run(uid, 'denied', DEFAULT_TIMEZONE);
+      }
+      if (policy.default_policy) {
+        db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(policy.default_policy, 'default_policy');
+      }
+    });
+    tx();
+
+    // Rename old file
+    fs.renameSync(ACCESS_JSON_PATH, ACCESS_JSON_PATH + '.migrated');
+    console.log('[db] Migrated access.json → SQLite users table');
+  } catch (err) {
+    console.error('[db] Failed to migrate access.json:', err);
+  }
+}
+
+// --- Messages ---
 
 export function saveMessage(msg: Omit<TelegramMessage, 'id' | 'created_at'>): TelegramMessage {
   const stmt = db.prepare(`
@@ -111,13 +171,15 @@ export function getRecent(chatId: number, limit = 20): TelegramMessage[] {
 export function listChats(): ChatInfo[] {
   return db.prepare(`
     SELECT
-      chat_id,
-      MAX(username) as username,
-      MAX(display_name) as display_name,
-      MAX(created_at) as last_message_at,
-      COUNT(*) as message_count
-    FROM messages
-    GROUP BY chat_id
+      m.chat_id,
+      MAX(m.username) as username,
+      MAX(m.display_name) as display_name,
+      MAX(m.created_at) as last_message_at,
+      COUNT(*) as message_count,
+      COALESCE(u.status, 'unknown') as access_status
+    FROM messages m
+    LEFT JOIN users u ON m.chat_id = u.user_id
+    GROUP BY m.chat_id
     ORDER BY last_message_at DESC
   `).all() as ChatInfo[];
 }
@@ -127,4 +189,59 @@ export function getLastIncomingMessageId(chatId: number): number | null {
     "SELECT telegram_message_id FROM messages WHERE chat_id = ? AND direction = 'in' ORDER BY created_at DESC LIMIT 1"
   ).get(chatId) as { telegram_message_id: number } | undefined;
   return row?.telegram_message_id ?? null;
+}
+
+// --- Users ---
+
+export function getUser(userId: number): UserRecord | null {
+  return (db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId) as UserRecord) ?? null;
+}
+
+export function upsertUser(userId: number, fields: Partial<Pick<UserRecord, 'username' | 'display_name' | 'status' | 'timezone'>>): void {
+  const existing = getUser(userId);
+  if (existing) {
+    const sets: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+    const vals: (string | number | null)[] = [];
+    if (fields.username !== undefined) { sets.push('username = ?'); vals.push(fields.username ?? null); }
+    if (fields.display_name !== undefined) { sets.push('display_name = ?'); vals.push(fields.display_name ?? null); }
+    if (fields.status !== undefined) { sets.push('status = ?'); vals.push(fields.status); }
+    if (fields.timezone !== undefined) { sets.push('timezone = ?'); vals.push(fields.timezone); }
+    if (vals.length > 0) {
+      vals.push(userId);
+      db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE user_id = ?`).run(...vals);
+    }
+  } else {
+    db.prepare(`
+      INSERT INTO users (user_id, username, display_name, status, timezone)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      userId,
+      fields.username ?? null,
+      fields.display_name ?? null,
+      fields.status ?? getDefaultPolicy(),
+      fields.timezone ?? DEFAULT_TIMEZONE,
+    );
+  }
+}
+
+export function listUsers(status?: string): UserRecord[] {
+  if (status) {
+    return db.prepare('SELECT * FROM users WHERE status = ? ORDER BY updated_at DESC').all(status) as UserRecord[];
+  }
+  return db.prepare('SELECT * FROM users ORDER BY updated_at DESC').all() as UserRecord[];
+}
+
+// --- Settings ---
+
+export function getSetting(key: string): string | null {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string): void {
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
+}
+
+export function getDefaultPolicy(): string {
+  return getSetting('default_policy') ?? 'pending';
 }

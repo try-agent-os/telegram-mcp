@@ -2,7 +2,7 @@ import { Bot, Context, InlineKeyboard } from 'grammy';
 import { createWriteStream, mkdirSync } from 'fs';
 import https from 'https';
 import path from 'path';
-import { checkAccess, getTimezone, setTimezone } from './access.js';
+import { checkAccess, getTimezone, setTimezone, touchUser } from './access.js';
 import { saveMessage } from './db.js';
 import type { IncomingMessageEvent, MediaType } from './types.js';
 
@@ -228,10 +228,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       return;
     }
 
-    const fs = await import('fs');
-    const msgLogPath = 'messages.json';
-    const previous = fs.existsSync(msgLogPath) ? JSON.parse(fs.readFileSync(msgLogPath, 'utf-8')) : [];
-    fs.writeFileSync(msgLogPath, JSON.stringify([...previous, msg], null, 2) + '\n');
+    touchUser(userId, username, displayName);
 
     dispatchEvent({
       userId,

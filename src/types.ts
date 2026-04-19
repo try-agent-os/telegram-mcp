@@ -32,6 +32,17 @@ export interface IncomingMessageEvent {
   caption: string | null;
 }
 
+export interface UserRecord {
+  user_id: number;
+  username: string | null;
+  display_name: string | null;
+  status: 'allowed' | 'pending' | 'denied';
+  timezone: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Legacy — used only for migration from access.json
 export interface AccessPolicy {
   allowlist: number[];
   pending: number[];

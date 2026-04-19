@@ -1,92 +1,43 @@
-import fs from 'fs';
-import path from 'path';
-import type { AccessPolicy } from './types.js';
-
-const ACCESS_PATH = path.join(process.cwd(), 'access.json');
+import { getUser, upsertUser, getDefaultPolicy } from './db.js';
 
 const DEFAULT_TIMEZONE = 'Europe/Lisbon';
 
-const DEFAULT_POLICY: AccessPolicy = {
-  allowlist: [123510069],
-  pending: [],
-  denied: [],
-  default_policy: 'pending',
-  timezones: {},
-};
-
-export function loadPolicy(): AccessPolicy {
-  if (!fs.existsSync(ACCESS_PATH)) {
-    savePolicy(DEFAULT_POLICY);
-    return DEFAULT_POLICY;
-  }
-  return JSON.parse(fs.readFileSync(ACCESS_PATH, 'utf-8'));
-}
-
-export function savePolicy(policy: AccessPolicy): void {
-  fs.writeFileSync(ACCESS_PATH, JSON.stringify(policy, null, 2) + '\n');
-}
-
 export function checkAccess(userId: number): 'allowed' | 'pending' | 'denied' {
-  const policy = loadPolicy();
-  if (policy.allowlist.includes(userId)) return 'allowed';
-  if (policy.denied.includes(userId)) return 'denied';
-  if (policy.pending.includes(userId)) return 'pending';
+  const user = getUser(userId);
+  if (user) return user.status;
 
-  // First contact
-  if (policy.default_policy === 'allow') {
-    policy.allowlist.push(userId);
-    savePolicy(policy);
-    return 'allowed';
-  }
-  if (policy.default_policy === 'deny') {
-    policy.denied.push(userId);
-    savePolicy(policy);
-    return 'denied';
-  }
-
-  // default: pending
-  policy.pending.push(userId);
-  savePolicy(policy);
-  return 'pending';
+  // First contact — apply default policy
+  const policy = getDefaultPolicy();
+  const status = policy === 'allow' ? 'allowed' : policy === 'deny' ? 'denied' : 'pending';
+  upsertUser(userId, { status: status as 'allowed' | 'pending' | 'denied' });
+  return status as 'allowed' | 'pending' | 'denied';
 }
 
 export function approveUser(userId: number): boolean {
-  const policy = loadPolicy();
-  policy.pending = policy.pending.filter(id => id !== userId);
-  policy.denied = policy.denied.filter(id => id !== userId);
-  if (!policy.allowlist.includes(userId)) {
-    policy.allowlist.push(userId);
-  }
-  savePolicy(policy);
+  upsertUser(userId, { status: 'allowed' });
+  return true;
+}
+
+export function denyUser(userId: number): boolean {
+  upsertUser(userId, { status: 'denied' });
   return true;
 }
 
 export function getTimezone(userId: number): string {
-  const policy = loadPolicy();
-  return policy.timezones?.[String(userId)] ?? DEFAULT_TIMEZONE;
+  const user = getUser(userId);
+  return user?.timezone ?? DEFAULT_TIMEZONE;
 }
 
 export function setTimezone(userId: number, tz: string): boolean {
-  // Validate IANA timezone
   try {
     Intl.DateTimeFormat(undefined, { timeZone: tz });
   } catch {
     return false;
   }
-  const policy = loadPolicy();
-  if (!policy.timezones) policy.timezones = {};
-  policy.timezones[String(userId)] = tz;
-  savePolicy(policy);
+  upsertUser(userId, { timezone: tz });
   return true;
 }
 
-export function denyUser(userId: number): boolean {
-  const policy = loadPolicy();
-  policy.pending = policy.pending.filter(id => id !== userId);
-  policy.allowlist = policy.allowlist.filter(id => id !== userId);
-  if (!policy.denied.includes(userId)) {
-    policy.denied.push(userId);
-  }
-  savePolicy(policy);
-  return true;
+export function touchUser(userId: number, username: string | null, displayName: string | null): void {
+  upsertUser(userId, { username: username ?? undefined, display_name: displayName ?? undefined });
 }

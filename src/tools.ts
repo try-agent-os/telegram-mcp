@@ -1,7 +1,6 @@
 import type { Bot } from 'grammy';
-import { saveMessage, searchMessages, getRecent, listChats, getLastIncomingMessageId } from './db.js';
-import { loadPolicy, approveUser, denyUser, checkAccess, getTimezone, setTimezone } from './access.js';
-import type { ChatInfo } from './types.js';
+import { saveMessage, searchMessages, getRecent, listChats, getLastIncomingMessageId, listUsers } from './db.js';
+import { approveUser, denyUser, getTimezone, setTimezone } from './access.js';
 
 export function getToolDefinitions() {
   return [
@@ -95,10 +94,12 @@ export function getToolDefinitions() {
     },
     {
       name: 'telegram_get_access_list',
-      description: 'View current access policy (allowlist, pending, denied)',
+      description: 'View all users with their access status and timezone',
       inputSchema: {
         type: 'object' as const,
-        properties: {},
+        properties: {
+          status: { type: 'string', enum: ['allowed', 'pending', 'denied'], description: 'Filter by status (optional)' },
+        },
       },
     },
     {
@@ -223,20 +224,12 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     }
 
     case 'telegram_list_chats': {
-      const chats = listChats();
-      const policy = loadPolicy();
-      const enriched: ChatInfo[] = chats.map(c => ({
-        ...c,
-        access_status: policy.allowlist.includes(c.chat_id) ? 'allowed' as const
-          : policy.pending.includes(c.chat_id) ? 'pending' as const
-          : policy.denied.includes(c.chat_id) ? 'denied' as const
-          : 'unknown' as const,
-      }));
-      return { chats: enriched };
+      return { chats: listChats() };
     }
 
     case 'telegram_get_access_list': {
-      return loadPolicy();
+      const { status } = args as { status?: string };
+      return { users: listUsers(status) };
     }
 
     case 'telegram_approve_user': {
