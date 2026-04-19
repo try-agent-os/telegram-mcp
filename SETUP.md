@@ -12,12 +12,6 @@
 - `yt-dlp` — downloads audio from URLs (YouTube, Instagram, TikTok, etc.) for transcription
   - macOS: `brew install yt-dlp`
   - Debian/Ubuntu: `sudo apt install yt-dlp` (or `pip install yt-dlp`)
-- `pdftotext` (from poppler) — extracts text from PDF documents
-  - macOS: `brew install poppler`
-  - Debian/Ubuntu: `sudo apt install poppler-utils`
-- `tesseract` + language packs — OCR for photos with text (Russian + English by default)
-  - macOS: `brew install tesseract tesseract-lang`
-  - Debian/Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng`
 
 ## Install
 

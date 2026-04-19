@@ -6,7 +6,7 @@ import path from 'path';
 import { checkAccess, touchUser } from './access.js';
 import { createCommands } from './commands/index.js';
 import { saveMessage } from './db.js';
-import { extractMediaUrl, processDocument, processPhoto, processUrl, processVideo, transcribeVoice } from './media-pipeline.js';
+import { extractMediaUrl, processUrl, processVideo, transcribeVoice } from './media-pipeline.js';
 import type { IncomingMessageEvent, MediaType } from './types.js';
 
 export interface ReactionEvent {
@@ -323,13 +323,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     try {
       filePath = await downloadFile(token, largest.file_id, `photo_${msg.message_id}.jpg`);
-      const ocr = await processPhoto(filePath);
-      if (ocr) {
-        text = ocr;
-        if (caption) text += `\n${caption}`;
-      } else {
-        text = buildText('photo', filePath, caption);
-      }
+      text = buildText('photo', filePath, caption);
     } catch (err) {
       console.error('[bot] photo download error:', err);
       text = buildText('photo', null, caption);
@@ -364,14 +358,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     try {
       filePath = await downloadFile(token, doc.file_id, localName);
-      const pdfText = await processDocument(filePath, originalName);
-      if (pdfText) {
-        text = pdfText;
-        if (caption) text += `\n${caption}`;
-      } else {
-        text = `[document: ${filePath} (${originalName})]`;
-        if (caption) text += `\n${caption}`;
-      }
+      text = `[document: ${filePath} (${originalName})]`;
+      if (caption) text += `\n${caption}`;
     } catch (err) {
       console.error('[bot] document download error:', err);
       text = `[document: ${originalName}, download failed]`;
