@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync, readdirSync, readFileSync, unlinkSync } from 'fs';
+import { mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { nodewhisper } from 'nodejs-whisper';
@@ -144,10 +144,14 @@ export async function processDocument(filePath: string, fileName: string): Promi
 const OCR_MIN_CHARS = 20;
 
 export async function processPhoto(filePath: string): Promise<string | null> {
-  const tempBase = path.join(MEDIA_DIR, `tess-${randomUUID()}`);
+  ensureMediaDir();
+  // tesseract/leptonica on macOS can't read paths containing the /tmp symlink —
+  // resolve to the canonical /private/tmp form before invoking.
+  const resolvedInput = realpathSync(filePath);
+  const resolvedDir = realpathSync(MEDIA_DIR);
+  const tempBase = path.join(resolvedDir, `tess-${randomUUID()}`);
   try {
-    ensureMediaDir();
-    await execFileP('tesseract', [filePath, tempBase, '-l', 'rus+eng', '--psm', '1'], {
+    await execFileP('tesseract', [resolvedInput, tempBase, '-l', 'rus+eng', '--psm', '1'], {
       timeout: 30000,
     });
     const text = readFileSync(`${tempBase}.txt`, 'utf8').trim();
