@@ -1,6 +1,6 @@
 import type { Bot } from 'grammy';
 import { saveMessage, searchMessages, getRecent, listChats, getLastIncomingMessageId } from './db.js';
-import { loadPolicy, approveUser, denyUser, checkAccess } from './access.js';
+import { loadPolicy, approveUser, denyUser, checkAccess, getTimezone, setTimezone } from './access.js';
 import type { ChatInfo } from './types.js';
 
 export function getToolDefinitions() {
@@ -123,6 +123,29 @@ export function getToolDefinitions() {
         required: ['user_id'],
       },
     },
+    {
+      name: 'telegram_set_timezone',
+      description: 'Set timezone for a user (IANA format, e.g. Europe/Moscow)',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          user_id: { type: 'number', description: 'Telegram user ID' },
+          timezone: { type: 'string', description: 'IANA timezone (e.g. Europe/Moscow, America/New_York)' },
+        },
+        required: ['user_id', 'timezone'],
+      },
+    },
+    {
+      name: 'telegram_get_timezone',
+      description: 'Get current timezone for a user',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          user_id: { type: 'number', description: 'Telegram user ID' },
+        },
+        required: ['user_id'],
+      },
+    },
   ];
 }
 
@@ -224,6 +247,18 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     case 'telegram_deny_user': {
       const { user_id } = args as { user_id: number };
       return { ok: denyUser(user_id), user_id };
+    }
+
+    case 'telegram_set_timezone': {
+      const { user_id, timezone } = args as { user_id: number; timezone: string };
+      const ok = setTimezone(user_id, timezone);
+      if (!ok) throw new Error(`Invalid timezone: ${timezone}`);
+      return { ok: true, user_id, timezone };
+    }
+
+    case 'telegram_get_timezone': {
+      const { user_id } = args as { user_id: number };
+      return { user_id, timezone: getTimezone(user_id) };
     }
 
     default:

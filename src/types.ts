@@ -17,6 +17,7 @@ export interface TelegramMessage {
 }
 
 export interface IncomingMessageEvent {
+  userId: number;
   chatId: number;
   text: string;
   username: string | null;
@@ -36,6 +37,7 @@ export interface AccessPolicy {
   pending: number[];
   denied: number[];
   default_policy: 'pending' | 'allow' | 'deny';
+  timezones: Record<string, string>;
 }
 
 export interface ChatInfo {

@@ -4,11 +4,14 @@ import type { AccessPolicy } from './types.js';
 
 const ACCESS_PATH = path.join(process.cwd(), 'access.json');
 
+const DEFAULT_TIMEZONE = 'Europe/Lisbon';
+
 const DEFAULT_POLICY: AccessPolicy = {
   allowlist: [123510069],
   pending: [],
   denied: [],
-  default_policy: 'pending'
+  default_policy: 'pending',
+  timezones: {},
 };
 
 export function loadPolicy(): AccessPolicy {
@@ -54,6 +57,25 @@ export function approveUser(userId: number): boolean {
   if (!policy.allowlist.includes(userId)) {
     policy.allowlist.push(userId);
   }
+  savePolicy(policy);
+  return true;
+}
+
+export function getTimezone(userId: number): string {
+  const policy = loadPolicy();
+  return policy.timezones?.[String(userId)] ?? DEFAULT_TIMEZONE;
+}
+
+export function setTimezone(userId: number, tz: string): boolean {
+  // Validate IANA timezone
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+  } catch {
+    return false;
+  }
+  const policy = loadPolicy();
+  if (!policy.timezones) policy.timezones = {};
+  policy.timezones[String(userId)] = tz;
   savePolicy(policy);
   return true;
 }

@@ -9,6 +9,7 @@ import express from 'express';
 import { initDb } from './db.js';
 import { createBot, onIncomingMessage, onReaction } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
+import { getTimezone } from './access.js';
 import type { Bot } from 'grammy';
 
 const PORT = parseInt(process.env.PORT ?? '3848', 10);
@@ -16,13 +17,22 @@ const PORT = parseInt(process.env.PORT ?? '3848', 10);
 // Track active MCP server instances for channel push
 const activeSessions = new Map<string, Server>();
 
-function getLisbonTime(): string {
-  return new Intl.DateTimeFormat('ru-RU', {
-    timeZone: 'Europe/Lisbon',
-    hour: '2-digit',
-    minute: '2-digit',
+function getLocalISO(tz: string): string {
+  const now = new Date();
+  const local = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false,
-  }).format(new Date()) + ' Europe/Lisbon';
+  }).formatToParts(now);
+  const p = (type: string) => local.find(p => p.type === type)!.value;
+  const utcMs = now.getTime();
+  const localMs = new Date(now.toLocaleString('en-US', { timeZone: tz })).getTime();
+  const offsetMin = (localMs - utcMs) / 60000;
+  const sign = offsetMin >= 0 ? '+' : '-';
+  const absH = String(Math.floor(Math.abs(offsetMin) / 60)).padStart(2, '0');
+  const absM = String(Math.abs(offsetMin) % 60).padStart(2, '0');
+  return `${p('year')}-${p('month')}-${p('day')}T${p('hour')}:${p('minute')}:${p('second')}${sign}${absH}:${absM}`;
 }
 
 function createMcpServer(bot: Bot): Server {
@@ -82,7 +92,7 @@ async function main() {
 
   // Handle incoming Telegram messages — push to all connected Claude sessions
   onIncomingMessage((event) => {
-    const { chatId, text, username, displayName, messageId, replyToMessageId, mediaType, isForward, forwardFrom } = event;
+    const { userId, chatId, text, username, displayName, messageId, replyToMessageId, mediaType, isForward, forwardFrom } = event;
     const from = username ? `@${username}` : displayName ?? 'Unknown';
     const replyInfo = replyToMessageId ? ` [reply to msg ${replyToMessageId}]` : '';
     const typeInfo = mediaType ? ` [${mediaType}]` : '';
@@ -93,6 +103,8 @@ async function main() {
     let content = text;
     if (replyToMessageId) content = `[reply to msg_id=${replyToMessageId}] ${content}`;
     if (isForward && forwardFrom) content = `[forwarded from ${forwardFrom}] ${content}`;
+
+    const tz = getTimezone(userId);
 
     // Push via claude/channel notification to all connected sessions
     for (const [sid, server] of activeSessions) {
@@ -110,8 +122,8 @@ async function main() {
               media_type: mediaType ?? '',
               is_forward: isForward ? 'true' : 'false',
               forward_from: forwardFrom ?? '',
-              ts: new Date().toISOString(),
-              local_time: getLisbonTime(),
+              local_date: getLocalISO(tz),
+              timezone: tz,
             },
           },
         });
@@ -142,8 +154,8 @@ async function main() {
               reaction_action: action,
               user: username ?? String(chatId),
               user_id: event.userId ? String(event.userId) : String(chatId),
-              ts: new Date().toISOString(),
-              local_time: getLisbonTime(),
+              local_date: getLocalISO(event.userId ? getTimezone(event.userId) : getTimezone(chatId)),
+              timezone: event.userId ? getTimezone(event.userId) : getTimezone(chatId),
             },
           },
         });

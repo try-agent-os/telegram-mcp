@@ -2,7 +2,7 @@ import { Bot, Context } from 'grammy';
 import { createWriteStream, mkdirSync } from 'fs';
 import https from 'https';
 import path from 'path';
-import { checkAccess } from './access.js';
+import { checkAccess, getTimezone, setTimezone } from './access.js';
 import { saveMessage } from './db.js';
 import type { IncomingMessageEvent, MediaType } from './types.js';
 
@@ -168,7 +168,30 @@ export function createBot(token: string): Bot {
       return;
     }
 
+    // Handle /timezone and /tz commands
+    const tzMatch = msg.text!.match(/^\/(timezone|tz)\s+(.*)/);
+    if (tzMatch) {
+      const tz = tzMatch[2].trim();
+      if (setTimezone(userId, tz)) {
+        await ctx.reply(`Timezone set to ${tz}`);
+      } else {
+        await ctx.reply(`Invalid timezone: ${tz}\nExample: /tz Europe/Moscow`);
+      }
+      return;
+    }
+    if (msg.text === '/timezone' || msg.text === '/tz') {
+      const current = getTimezone(userId);
+      await ctx.reply(`Current timezone: ${current}\nUsage: /tz Europe/Moscow`);
+      return;
+    }
+
+    const fs = await import('fs');
+    const msgLogPath = 'messages.json';
+    const previous = fs.existsSync(msgLogPath) ? JSON.parse(fs.readFileSync(msgLogPath, 'utf-8')) : [];
+    fs.writeFileSync(msgLogPath, JSON.stringify([...previous, msg], null, 2) + '\n');
+
     dispatchEvent({
+      userId,
       chatId,
       text: msg.text!,
       username,
@@ -215,7 +238,7 @@ export function createBot(token: string): Bot {
     }
 
     dispatchEvent({
-      chatId, text, username, displayName,
+      userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       mediaType: 'voice', filePath, fileName: null,
@@ -246,7 +269,7 @@ export function createBot(token: string): Bot {
     }
 
     dispatchEvent({
-      chatId, text, username, displayName,
+      userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       mediaType: 'video_note', filePath, fileName: null,
@@ -278,7 +301,7 @@ export function createBot(token: string): Bot {
     }
 
     dispatchEvent({
-      chatId, text, username, displayName,
+      userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       mediaType: 'photo', filePath, fileName: null,
@@ -315,7 +338,7 @@ export function createBot(token: string): Bot {
     }
 
     dispatchEvent({
-      chatId, text, username, displayName,
+      userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       mediaType: 'document', filePath, fileName: originalName,
@@ -349,7 +372,7 @@ export function createBot(token: string): Bot {
     }
 
     dispatchEvent({
-      chatId, text, username, displayName,
+      userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       mediaType: 'video', filePath, fileName: video.file_name ?? null,
@@ -371,7 +394,7 @@ export function createBot(token: string): Bot {
     const text = `[sticker: ${emoji}]`;
 
     dispatchEvent({
-      chatId, text, username, displayName,
+      userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       mediaType: 'sticker', filePath: null, fileName: null,
