@@ -5,3 +5,4 @@ messages.db
 messages.db-*
 access.json
 messages.json
+.claude/
