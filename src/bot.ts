@@ -143,7 +143,62 @@ export function createBot(token: string, options?: BotOptions): Bot {
     if (messageCallback) messageCallback(event);
   }
 
-  // Text messages
+  // Text messages with per-(chat,user) debounced batching.
+  // Share+caption in Telegram lands as two messages <500ms apart; without batching
+  // Claude sees them as independent prompts and replies twice.
+  const TEXT_BATCH_WINDOW_MS = 1500;
+
+  interface BufferedTextMsg {
+    text: string;
+    messageId: number;
+    replyToMessageId: number | null;
+    userId: number;
+    username: string | null;
+    displayName: string | null;
+    isForward: boolean;
+    forwardFrom: string | null;
+    chatId: number;
+  }
+
+  interface TextBatch {
+    messages: BufferedTextMsg[];
+    timer: NodeJS.Timeout;
+  }
+
+  const textBatches = new Map<string, TextBatch>();
+
+  async function flushTextBatch(key: string): Promise<void> {
+    const batch = textBatches.get(key);
+    if (!batch) return;
+    textBatches.delete(key);
+
+    const combined = batch.messages.map(m => m.text).join('\n');
+    const last = batch.messages[batch.messages.length - 1];
+
+    let text = combined;
+    const url = extractMediaUrl(combined);
+    if (url) {
+      const transcribed = await processUrl(url, last.messageId);
+      if (transcribed) text = `${combined}\n\n${transcribed}`;
+    }
+
+    dispatchEvent({
+      userId: last.userId,
+      chatId: last.chatId,
+      text,
+      username: last.username,
+      displayName: last.displayName,
+      messageId: last.messageId,
+      replyToMessageId: last.replyToMessageId,
+      mediaType: url ? 'url' : null,
+      filePath: null,
+      fileName: null,
+      isForward: last.isForward,
+      forwardFrom: last.forwardFrom,
+      caption: null,
+    });
+  }
+
   bot.on('message:text', async (ctx: Context) => {
     const msg = ctx.message!;
     const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
@@ -157,30 +212,28 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     touchUser(userId, username, displayName);
 
-    let text = msg.text!;
-
-    // If the message contains a supported media URL, fetch + transcribe and append.
-    const url = extractMediaUrl(text);
-    if (url) {
-      const transcribed = await processUrl(url, msg.message_id);
-      if (transcribed) text = `${text}\n\n${transcribed}`;
-    }
-
-    dispatchEvent({
-      userId,
-      chatId,
-      text,
-      username,
-      displayName,
+    const buffered: BufferedTextMsg = {
+      text: msg.text!,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
-      mediaType: url ? 'url' : null,
-      filePath: null,
-      fileName: null,
+      userId,
+      username,
+      displayName,
       isForward,
       forwardFrom,
-      caption: null,
-    });
+      chatId,
+    };
+
+    const key = `${chatId}:${userId}`;
+    const existing = textBatches.get(key);
+    if (existing) {
+      clearTimeout(existing.timer);
+      existing.messages.push(buffered);
+      existing.timer = setTimeout(() => { void flushTextBatch(key); }, TEXT_BATCH_WINDOW_MS);
+    } else {
+      const timer = setTimeout(() => { void flushTextBatch(key); }, TEXT_BATCH_WINDOW_MS);
+      textBatches.set(key, { messages: [buffered], timer });
+    }
   });
 
   // Voice messages
