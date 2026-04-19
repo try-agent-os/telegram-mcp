@@ -1,8 +1,10 @@
-import { Bot, Context, InlineKeyboard } from 'grammy';
+import { Bot, Context } from 'grammy';
+import type { Message, MessageOrigin } from '@grammyjs/types';
 import { createWriteStream, mkdirSync } from 'fs';
 import https from 'https';
 import path from 'path';
-import { checkAccess, getTimezone, setTimezone, touchUser } from './access.js';
+import { checkAccess, touchUser } from './access.js';
+import { createCommands } from './commands/index.js';
 import { saveMessage } from './db.js';
 import type { IncomingMessageEvent, MediaType } from './types.js';
 
@@ -92,23 +94,22 @@ async function transcribeVoice(filePath: string): Promise<string | null> {
   }
 }
 
-function getForwardFrom(msg: any): string | null {
-  const origin = msg.forward_origin;
+function getForwardFrom(origin: MessageOrigin | undefined): string | null {
   if (!origin) return null;
 
   if (origin.type === 'user') {
     const u = origin.sender_user;
-    const name = [u?.first_name, u?.last_name].filter(Boolean).join(' ');
-    return u?.username ? `@${u.username} (${name})` : name || 'Unknown user';
+    const name = [u.first_name, u.last_name].filter(Boolean).join(' ');
+    return u.username ? `@${u.username} (${name})` : name || 'Unknown user';
   }
   if (origin.type === 'hidden_user') return origin.sender_user_name ?? 'Hidden user';
   if (origin.type === 'chat') {
     const c = origin.sender_chat;
-    return c?.title ?? c?.username ?? 'Unknown chat';
+    return c.title ?? c.username ?? 'Unknown chat';
   }
   if (origin.type === 'channel') {
     const c = origin.chat;
-    return c?.title ?? c?.username ?? 'Unknown channel';
+    return c.title ?? c.username ?? 'Unknown channel';
   }
   return 'Forwarded';
 }
@@ -141,13 +142,16 @@ export function createBot(token: string, options?: BotOptions): Bot {
     { command: 'help', description: 'List available commands' },
   ]).catch(err => console.error('[bot] Failed to set commands:', err));
 
-  function getBaseFields(msg: any) {
-    const userId = msg.from?.id;
+  // Register commands before message handlers so they take priority
+  bot.use(createCommands(options));
+
+  function getBaseFields(msg: Message) {
+    const userId = msg.from!.id;
     const chatId = msg.chat.id;
     const username = msg.from?.username ?? null;
     const displayName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || null;
     const isForward = !!msg.forward_origin;
-    const forwardFrom = getForwardFrom(msg);
+    const forwardFrom = getForwardFrom(msg.forward_origin);
     return { userId, chatId, username, displayName, isForward, forwardFrom };
   }
 
@@ -178,53 +182,6 @@ export function createBot(token: string, options?: BotOptions): Bot {
     if (access === 'denied') return;
     if (access === 'pending') {
       await ctx.reply('Access request submitted. Please wait for approval.');
-      return;
-    }
-
-    // Handle /timezone and /tz commands
-    const tzMatch = msg.text!.match(/^\/(timezone|tz)\s+(.*)/);
-    if (tzMatch) {
-      const tz = tzMatch[2].trim();
-      if (setTimezone(userId, tz)) {
-        await ctx.reply(`Timezone set to ${tz}`);
-      } else {
-        await ctx.reply(`Invalid timezone: ${tz}\nExample: /tz Europe/Moscow`);
-      }
-      return;
-    }
-    if (msg.text === '/timezone' || msg.text === '/tz') {
-      const current = getTimezone(userId);
-      const kb = new InlineKeyboard()
-        .text('Europe', 'tz_region:Europe').text('America', 'tz_region:America').row()
-        .text('Asia', 'tz_region:Asia').text('Pacific', 'tz_region:Pacific').row()
-        .text('Other', 'tz_region:Other');
-      await ctx.reply(`Current: ${current}\nSelect region:`, { reply_markup: kb });
-      return;
-    }
-    if (msg.text === '/status') {
-      const sessions = options?.getSessionCount?.() ?? 0;
-      const uptime = options?.getUptime?.() ?? 0;
-      const h = Math.floor(uptime / 3600);
-      const m = Math.floor((uptime % 3600) / 60);
-      await ctx.reply(
-        `Bot: running\n` +
-        `Claude sessions: ${sessions}\n` +
-        `Uptime: ${h}h ${m}m`
-      );
-      return;
-    }
-    if (msg.text === '/id') {
-      await ctx.reply(`Your user ID: ${userId}`);
-      return;
-    }
-    if (msg.text === '/help') {
-      await ctx.reply(
-        `/tz <zone> — set timezone (e.g. /tz Europe/Moscow)\n` +
-        `/tz — view current timezone\n` +
-        `/status — bot & Claude connection status\n` +
-        `/id — show your Telegram user ID\n` +
-        `/help — this message`
-      );
       return;
     }
 
@@ -485,92 +442,6 @@ export function createBot(token: string, options?: BotOptions): Bot {
         reactionCallback({ chatId, messageId, emoji, action: 'removed', username, displayName, userId });
       }
     }
-  });
-
-  // Timezone inline keyboard callbacks
-  const TZ_OPTIONS: Record<string, [string, string][]> = {
-    Europe: [
-      ['Lisbon', 'Europe/Lisbon'], ['London', 'Europe/London'],
-      ['Berlin', 'Europe/Berlin'], ['Moscow', 'Europe/Moscow'],
-      ['Istanbul', 'Europe/Istanbul'], ['Kyiv', 'Europe/Kyiv'],
-    ],
-    America: [
-      ['New York', 'America/New_York'], ['Chicago', 'America/Chicago'],
-      ['Denver', 'America/Denver'], ['Los Angeles', 'America/Los_Angeles'],
-      ['São Paulo', 'America/Sao_Paulo'], ['Toronto', 'America/Toronto'],
-    ],
-    Asia: [
-      ['Dubai', 'Asia/Dubai'], ['Kolkata', 'Asia/Kolkata'],
-      ['Bangkok', 'Asia/Bangkok'], ['Singapore', 'Asia/Singapore'],
-      ['Tokyo', 'Asia/Tokyo'], ['Shanghai', 'Asia/Shanghai'],
-    ],
-    Pacific: [
-      ['Auckland', 'Pacific/Auckland'], ['Sydney', 'Australia/Sydney'],
-      ['Honolulu', 'Pacific/Honolulu'], ['Fiji', 'Pacific/Fiji'],
-    ],
-    Other: [
-      ['UTC', 'UTC'], ['GMT', 'Etc/GMT'],
-      ['Africa/Cairo', 'Africa/Cairo'], ['Africa/Lagos', 'Africa/Lagos'],
-    ],
-  };
-
-  bot.on('callback_query:data', async (ctx) => {
-    const data = ctx.callbackQuery.data;
-    const userId = ctx.callbackQuery.from.id;
-
-    // Region selected — show cities
-    if (data.startsWith('tz_region:')) {
-      const region = data.replace('tz_region:', '');
-      const options = TZ_OPTIONS[region];
-      if (!options) { await ctx.answerCallbackQuery('Unknown region'); return; }
-
-      const kb = new InlineKeyboard();
-      for (let i = 0; i < options.length; i += 2) {
-        const row = options.slice(i, i + 2);
-        for (const [label, tz] of row) {
-          kb.text(label, `tz_set:${tz}`);
-        }
-        kb.row();
-      }
-      kb.text('< Back', 'tz_back').text('Type manually', 'tz_custom');
-
-      await ctx.editMessageText(`Select timezone (${region}):`, { reply_markup: kb });
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    // Timezone selected
-    if (data.startsWith('tz_set:')) {
-      const tz = data.replace('tz_set:', '');
-      if (setTimezone(userId, tz)) {
-        await ctx.editMessageText(`Timezone set to ${tz}`);
-      } else {
-        await ctx.editMessageText(`Invalid timezone: ${tz}`);
-      }
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    // Back to regions
-    if (data === 'tz_back') {
-      const current = getTimezone(userId);
-      const kb = new InlineKeyboard()
-        .text('Europe', 'tz_region:Europe').text('America', 'tz_region:America').row()
-        .text('Asia', 'tz_region:Asia').text('Pacific', 'tz_region:Pacific').row()
-        .text('Other', 'tz_region:Other');
-      await ctx.editMessageText(`Current: ${current}\nSelect region:`, { reply_markup: kb });
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    // Custom input prompt
-    if (data === 'tz_custom') {
-      await ctx.editMessageText('Send timezone as text:\n/tz Europe/Moscow');
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    await ctx.answerCallbackQuery();
   });
 
   bot.catch((err) => {

@@ -1,4 +1,5 @@
 import type { Bot } from 'grammy';
+import type { ReactionTypeEmoji } from '@grammyjs/types';
 import { saveMessage, searchMessages, getRecent, listChats, getLastIncomingMessageId, listUsers } from './db.js';
 import { approveUser, denyUser, getTimezone, setTimezone } from './access.js';
 
@@ -207,7 +208,7 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
 
     case 'telegram_react': {
       const { chat_id, message_id, emoji } = args as { chat_id: number; message_id: number; emoji: string };
-      await bot.api.setMessageReaction(chat_id, message_id, [{ type: 'emoji', emoji: emoji as any }]);
+      await bot.api.setMessageReaction(chat_id, message_id, [{ type: 'emoji', emoji } as ReactionTypeEmoji]);
       return { ok: true };
     }
 
