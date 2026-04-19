@@ -2,3 +2,6 @@ node_modules/
 dist/
 .env
 messages.db
+messages.db-shm
+messages.db-wal
+access.json

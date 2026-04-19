@@ -125,9 +125,9 @@ async function main() {
   onReaction((event) => {
     const { chatId, messageId, emoji, action, username, displayName } = event;
     const from = username ? `@${username}` : displayName ?? 'Unknown';
-    console.log(`[Telegram] ${from} ${action === 'added' ? 'поставил' : 'убрал'} реакцию ${emoji} на msg ${messageId} в чате ${chatId}`);
+    console.log(`[Telegram] ${from} ${action === 'added' ? 'added' : 'removed'} reaction ${emoji} on msg ${messageId} in chat ${chatId}`);
 
-    const content = `[reaction: ${emoji}] на message_id=${messageId}`;
+    const content = `[reaction: ${emoji}] on message_id=${messageId}`;
 
     for (const [sid, server] of activeSessions) {
       try {

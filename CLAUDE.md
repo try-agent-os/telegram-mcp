@@ -1,21 +1,21 @@
 # Telegram MCP Server
 
-Telegram бот + MCP сервер для Claude Code. Один процесс, стабильное подключение.
+Telegram bot + MCP server for Claude Code. Single process, stable connection.
 
-## Стек
+## Stack
 - Node.js + TypeScript
 - grammY (Telegram bot framework)
 - @modelcontextprotocol/sdk (MCP server)
 - better-sqlite3 (SQLite + FTS5)
 
-## Команды
+## Commands
 ```bash
 npm run build    # tsc
 npm run dev      # tsx src/index.ts
 npm start        # node dist/index.js
 ```
 
-## Структура
+## Structure
 ```
 src/
   index.ts    — entry: MCP server + grammY bot startup
@@ -26,8 +26,5 @@ src/
   types.ts    — shared types
 ```
 
-## Переменные окружения
-- `TELEGRAM_BOT_TOKEN` — токен бота (обязательный)
-
-## Спецификация
-Полный spec: `/Users/vasily/Workspaces/novostudio/claude/docs/superpowers/specs/2026-04-05-telegram-mcp-design.md`
+## Environment Variables
+- `TELEGRAM_BOT_TOKEN` — bot token (required)

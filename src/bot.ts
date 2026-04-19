@@ -164,7 +164,7 @@ export function createBot(token: string): Bot {
     const access = checkAccess(userId);
     if (access === 'denied') return;
     if (access === 'pending') {
-      await ctx.reply('Запрос на доступ отправлен. Ожидайте подтверждения.');
+      await ctx.reply('Access request submitted. Please wait for approval.');
       return;
     }
 
@@ -191,7 +191,7 @@ export function createBot(token: string): Bot {
 
     const access = checkAccess(userId);
     if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Нет доступа.'); return; }
+    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
 
     const voice = msg.voice!;
     const caption = msg.caption ?? null;
@@ -223,14 +223,14 @@ export function createBot(token: string): Bot {
     });
   });
 
-  // Video notes (круглые видео)
+  // Video notes (round videos)
   bot.on('message:video_note', async (ctx: Context) => {
     const msg = ctx.message!;
     const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
     const access = checkAccess(userId);
     if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Нет доступа.'); return; }
+    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
 
     const vn = msg.video_note!;
     let filePath: string | null = null;
@@ -261,7 +261,7 @@ export function createBot(token: string): Bot {
 
     const access = checkAccess(userId);
     if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Нет доступа.'); return; }
+    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
 
     const photos = msg.photo!;
     const largest = photos[photos.length - 1]; // highest resolution
@@ -293,7 +293,7 @@ export function createBot(token: string): Bot {
 
     const access = checkAccess(userId);
     if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Нет доступа.'); return; }
+    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
 
     const doc = msg.document!;
     const caption = msg.caption ?? null;
@@ -330,7 +330,7 @@ export function createBot(token: string): Bot {
 
     const access = checkAccess(userId);
     if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Нет доступа.'); return; }
+    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
 
     const video = msg.video!;
     const caption = msg.caption ?? null;
@@ -364,7 +364,7 @@ export function createBot(token: string): Bot {
 
     const access = checkAccess(userId);
     if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Нет доступа.'); return; }
+    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
 
     const sticker = msg.sticker!;
     const emoji = sticker.emoji ?? '?';
