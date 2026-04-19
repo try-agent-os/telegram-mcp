@@ -7,6 +7,7 @@ Telegram bot + MCP server for Claude Code. Single process, stable connection.
 - grammY (Telegram bot framework)
 - @modelcontextprotocol/sdk (MCP server)
 - better-sqlite3 (SQLite + FTS5)
+- nodejs-whisper (local voice transcription via whisper.cpp)
 
 ## Commands
 ```bash
@@ -28,3 +29,13 @@ src/
 
 ## Environment Variables
 - `TELEGRAM_BOT_TOKEN` — bot token (required)
+
+## Setup prerequisites
+
+See `SETUP.md` for full instructions. Key things to keep in mind when making changes or deploying:
+
+- **System deps**: `cmake`, `ffmpeg` must be installed (not npm deps). Missing cmake → whisper.cpp won't build → voice transcription silently fails.
+- **Whisper model**: `ggml-medium.bin` (~1.5GB) must be downloaded into `node_modules/nodejs-whisper/cpp/whisper.cpp/models/`. Not in git, not auto-downloaded in non-TTY. See SETUP.md for the command.
+- **whisper.cpp build**: happens on first `transcribeVoice()` call (~30s cold). To avoid a cold first voice message, pre-build after install.
+- **Transcription flow**: voice → `/tmp/telegram-mcp/voice_X.ogg` → nodejs-whisper converts to WAV → whisper-cli transcribes → timestamps stripped by `parseWhisperOutput()` in `bot.ts`.
+- **Performance**: ~1.3x realtime on Apple Silicon with Metal. Longer voice messages take proportionally longer — user waits synchronously.

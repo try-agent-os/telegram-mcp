@@ -3,6 +3,7 @@ import type { Message, MessageOrigin } from '@grammyjs/types';
 import { createWriteStream, mkdirSync } from 'fs';
 import https from 'https';
 import path from 'path';
+import { nodewhisper } from 'nodejs-whisper';
 import { checkAccess, touchUser } from './access.js';
 import { createCommands } from './commands/index.js';
 import { saveMessage } from './db.js';
@@ -63,31 +64,30 @@ async function downloadFile(token: string, fileId: string, destFileName: string)
   return destPath;
 }
 
+function parseWhisperOutput(raw: string): string {
+  // whisper-cli prints lines like "[00:00:00.000 --> 00:00:05.600]   text"
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const segments = lines
+    .map(l => l.replace(/^\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}\]\s*/, ''))
+    .filter(Boolean);
+  return segments.join(' ').trim();
+}
+
 async function transcribeVoice(filePath: string): Promise<string | null> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
-
   try {
-    const { readFileSync } = await import('fs');
-    const audioData = readFileSync(filePath);
-    const formData = new FormData();
-    formData.append('file', new Blob([audioData], { type: 'audio/ogg' }), path.basename(filePath));
-    formData.append('model', 'whisper-1');
-    formData.append('language', 'ru');
-
-    const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: formData,
+    const raw = await nodewhisper(filePath, {
+      modelName: 'medium',
+      whisperOptions: {
+        outputInText: false,
+        outputInSrt: false,
+        outputInVtt: false,
+        outputInJson: false,
+        translateToEnglish: false,
+        wordTimestamps: false,
+      },
     });
-
-    if (!res.ok) {
-      console.error(`[whisper] API error: ${res.status}`);
-      return null;
-    }
-
-    const data = await res.json() as { text: string };
-    return data.text || null;
+    const text = parseWhisperOutput(raw);
+    return text || null;
   } catch (err) {
     console.error('[whisper] transcription error:', err);
     return null;
