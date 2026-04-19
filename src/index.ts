@@ -88,7 +88,11 @@ async function main() {
   console.log('[telegram-mcp] Database initialized');
 
   // Create grammY bot
-  const bot = createBot(token);
+  const startTime = Date.now();
+  const bot = createBot(token, {
+    getSessionCount: () => activeSessions.size,
+    getUptime: () => (Date.now() - startTime) / 1000,
+  });
 
   // Handle incoming Telegram messages — push to all connected Claude sessions
   onIncomingMessage((event) => {
