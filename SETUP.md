@@ -79,6 +79,26 @@ whisper_full_with_state: auto-detected language: ru (p = 0.97)
 - `node_modules/nodejs-whisper/cpp/whisper.cpp/build/` and `models/ggml-medium.bin` are **not** in git — they must be rebuilt / redownloaded on each fresh `npm install`.
 - If you update `nodejs-whisper`, re-run the model download and build steps.
 
+## Run as a launchd user agent (macOS)
+
+Example plist in `deploy/com.novostudio.telegram-mcp.plist`. Copy it to `~/Library/LaunchAgents/`, adjust paths, then bootstrap:
+
+```bash
+cp deploy/com.novostudio.telegram-mcp.plist ~/Library/LaunchAgents/
+# edit paths inside the plist (node binary, project dir, log file)
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.novostudio.telegram-mcp.plist
+```
+
+Restart after a code change (`npm run build` first — the plist runs `dist/index.js`):
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.novostudio.telegram-mcp"
+```
+
+Logs go to the path set in `StandardOutPath` / `StandardErrorPath` (e.g. `~/Library/Logs/telegram-mcp.log`).
+
+**Important**: the plist sets an explicit `PATH` that includes `/opt/homebrew/bin` so `ffmpeg` (needed by whisper.cpp to convert OGG → WAV) is found. launchd does not inherit your shell's PATH.
+
 ## Local install log (macOS / Apple Silicon, 2026-04-19)
 
 Exact commands that worked on the dev machine. Reproduce or adapt for a new setup:
