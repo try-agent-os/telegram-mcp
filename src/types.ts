@@ -1,4 +1,4 @@
-export type MediaType = 'voice' | 'video_note' | 'photo' | 'document' | 'video' | 'sticker';
+export type MediaType = 'voice' | 'video_note' | 'photo' | 'document' | 'video' | 'sticker' | 'url';
 
 export interface TelegramMessage {
   id: number;

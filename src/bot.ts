@@ -3,10 +3,10 @@ import type { Message, MessageOrigin } from '@grammyjs/types';
 import { createWriteStream, mkdirSync } from 'fs';
 import https from 'https';
 import path from 'path';
-import { nodewhisper } from 'nodejs-whisper';
 import { checkAccess, touchUser } from './access.js';
 import { createCommands } from './commands/index.js';
 import { saveMessage } from './db.js';
+import { extractMediaUrl, processUrl, transcribeVoice } from './media-pipeline.js';
 import type { IncomingMessageEvent, MediaType } from './types.js';
 
 export interface ReactionEvent {
@@ -62,36 +62,6 @@ async function downloadFile(token: string, fileId: string, destFileName: string)
   });
 
   return destPath;
-}
-
-function parseWhisperOutput(raw: string): string {
-  // whisper-cli prints lines like "[00:00:00.000 --> 00:00:05.600]   text"
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  const segments = lines
-    .map(l => l.replace(/^\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}\]\s*/, ''))
-    .filter(Boolean);
-  return segments.join(' ').trim();
-}
-
-async function transcribeVoice(filePath: string): Promise<string | null> {
-  try {
-    const raw = await nodewhisper(filePath, {
-      modelName: 'medium',
-      whisperOptions: {
-        outputInText: false,
-        outputInSrt: false,
-        outputInVtt: false,
-        outputInJson: false,
-        translateToEnglish: false,
-        wordTimestamps: false,
-      },
-    });
-    const text = parseWhisperOutput(raw);
-    return text || null;
-  } catch (err) {
-    console.error('[whisper] transcription error:', err);
-    return null;
-  }
 }
 
 function getForwardFrom(origin: MessageOrigin | undefined): string | null {
@@ -187,15 +157,24 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     touchUser(userId, username, displayName);
 
+    let text = msg.text!;
+
+    // If the message contains a supported media URL, fetch + transcribe and append.
+    const url = extractMediaUrl(text);
+    if (url) {
+      const transcribed = await processUrl(url, msg.message_id);
+      if (transcribed) text = `${text}\n\n${transcribed}`;
+    }
+
     dispatchEvent({
       userId,
       chatId,
-      text: msg.text!,
+      text,
       username,
       displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
-      mediaType: null,
+      mediaType: url ? 'url' : null,
       filePath: null,
       fileName: null,
       isForward,
