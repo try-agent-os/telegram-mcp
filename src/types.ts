@@ -24,6 +24,7 @@ export interface IncomingMessageEvent {
   displayName: string | null;
   messageId: number;
   replyToMessageId: number | null;
+  quotedText: string | null;
   mediaType: MediaType | null;
   filePath: string | null;
   fileName: string | null;

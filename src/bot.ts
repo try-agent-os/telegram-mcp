@@ -152,6 +152,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     text: string;
     messageId: number;
     replyToMessageId: number | null;
+    quotedText: string | null;
     userId: number;
     username: string | null;
     displayName: string | null;
@@ -190,6 +191,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       displayName: last.displayName,
       messageId: last.messageId,
       replyToMessageId: last.replyToMessageId,
+      quotedText: last.quotedText,
       mediaType: url ? 'url' : null,
       filePath: null,
       fileName: null,
@@ -216,6 +218,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       text: msg.text!,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       userId,
       username,
       displayName,
@@ -270,6 +273,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'voice', filePath, fileName: null,
       isForward, forwardFrom, caption,
     });
@@ -301,6 +305,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'video_note', filePath, fileName: null,
       isForward, forwardFrom, caption: null,
     });
@@ -333,6 +338,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'photo', filePath, fileName: null,
       isForward, forwardFrom, caption,
     });
@@ -370,6 +376,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'document', filePath, fileName: originalName,
       isForward, forwardFrom, caption,
     });
@@ -410,6 +417,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'video', filePath, fileName: video.file_name ?? null,
       isForward, forwardFrom, caption,
     });
@@ -432,6 +440,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       userId, chatId, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'sticker', filePath: null, fileName: null,
       isForward, forwardFrom, caption: null,
     });

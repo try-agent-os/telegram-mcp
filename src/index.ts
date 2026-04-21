@@ -94,16 +94,19 @@ async function main() {
 
   // Handle incoming Telegram messages — push to all connected Claude sessions
   onIncomingMessage((event) => {
-    const { userId, chatId, text, username, displayName, messageId, replyToMessageId, mediaType, isForward, forwardFrom } = event;
+    const { userId, chatId, text, username, displayName, messageId, replyToMessageId, quotedText, mediaType, isForward, forwardFrom } = event;
     const from = username ? `@${username}` : displayName ?? 'Unknown';
-    const replyInfo = replyToMessageId ? ` [reply to msg ${replyToMessageId}]` : '';
+    const replyInfo = replyToMessageId ? ` [reply to msg ${replyToMessageId}${quotedText ? ` quoted: "${quotedText.slice(0, 40)}"` : ''}]` : '';
     const typeInfo = mediaType ? ` [${mediaType}]` : '';
     const fwdInfo = isForward && forwardFrom ? ` [fwd from: ${forwardFrom}]` : '';
     console.log(`[Telegram] ${from}${typeInfo}${fwdInfo} (chat ${chatId}, msg ${messageId}${replyInfo}):\n> ${text}`);
 
-    // Build content with reply/forward context
+    // Build content with reply/forward/quote context
     let content = text;
-    if (replyToMessageId) content = `[reply to msg_id=${replyToMessageId}] ${content}`;
+    if (replyToMessageId) {
+      const quoteSuffix = quotedText ? ` quoted="${quotedText.replace(/"/g, '\\"')}"` : '';
+      content = `[reply to msg_id=${replyToMessageId}${quoteSuffix}] ${content}`;
+    }
     if (isForward && forwardFrom) content = `[forwarded from ${forwardFrom}] ${content}`;
 
     const tz = getTimezone(userId);
@@ -119,6 +122,7 @@ async function main() {
               chat_id: String(chatId),
               message_id: String(messageId),
               reply_to_message_id: replyToMessageId ? String(replyToMessageId) : '',
+              quoted_text: quotedText ?? '',
               user: username ?? String(chatId),
               user_id: String(chatId),
               media_type: mediaType ?? '',
