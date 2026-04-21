@@ -3,6 +3,71 @@ import type { ReactionTypeEmoji } from '@grammyjs/types';
 import { saveMessage, searchMessages, getRecent, listChats, getLastIncomingMessageId, listUsers } from './db.js';
 import { approveUser, denyUser, getTimezone, setTimezone } from './access.js';
 
+// Markdown → Telegram HTML conversion.
+// Telegram HTML subset: <b>, <i>, <u>, <s>, <code>, <pre>, <a>, <tg-spoiler>, <blockquote>.
+// Auto-applied when text contains markdown syntax and parse_mode not explicitly set.
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function hasMarkdown(text: string): boolean {
+  return /(\*\*[^*\n]+\*\*|```[\s\S]+?```|`[^`\n]+`|\[[^\]\n]+\]\([^\s)]+\)|^#+\s|^\s*[-*]\s)/m.test(text);
+}
+
+function markdownToTelegramHtml(text: string): string {
+  const codeBlocks: string[] = [];
+  const inlineCodes: string[] = [];
+
+  // 1. Extract fenced code blocks ```lang\n...\n```
+  let working = text.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_m, lang, body) => {
+    const idx = codeBlocks.length;
+    const langAttr = lang ? ` class="language-${lang}"` : '';
+    codeBlocks.push(`<pre><code${langAttr}>${escapeHtml(body.replace(/\n$/, ''))}</code></pre>`);
+    return `\u0000CODEBLOCK${idx}\u0000`;
+  });
+
+  // 2. Extract inline code `...`
+  working = working.replace(/`([^`\n]+)`/g, (_m, body) => {
+    const idx = inlineCodes.length;
+    inlineCodes.push(`<code>${escapeHtml(body)}</code>`);
+    return `\u0000INLINE${idx}\u0000`;
+  });
+
+  // 3. HTML-escape remaining text
+  working = escapeHtml(working);
+
+  // 4. Apply markdown transformations on escaped text.
+  // Bold: **text** → <b>text</b>
+  working = working.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+  // Italic: _text_ → <i>text</i> (strict: underscore-wrapped, non-greedy, no newlines)
+  working = working.replace(/(^|[\s(])_([^_\n]+)_(?=[\s.,!?)]|$)/g, '$1<i>$2</i>');
+  // Links: [text](url) — note: & was escaped to &amp; so must match that
+  working = working.replace(/\[([^\]\n]+)\]\(([^\s)]+)\)/g, (_m, label, url) => {
+    return `<a href="${url.replace(/&amp;/g, '&')}">${label}</a>`;
+  });
+  // Headers: # text (line start) → <b>text</b>
+  working = working.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+  // Bullets: - item or * item (line start) → • item
+  working = working.replace(/^(\s*)[-*]\s+/gm, '$1• ');
+
+  // 5. Restore code placeholders
+  working = working.replace(/\u0000INLINE(\d+)\u0000/g, (_m, i) => inlineCodes[Number(i)]);
+  working = working.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (_m, i) => codeBlocks[Number(i)]);
+
+  return working;
+}
+
+// Decide parse_mode and transform text when auto-markdown is desired.
+function prepareOutgoing(text: string, explicitParseMode?: string): { text: string; parse_mode?: 'HTML' | 'MarkdownV2' } {
+  if (explicitParseMode) {
+    return { text, parse_mode: explicitParseMode as 'HTML' | 'MarkdownV2' };
+  }
+  if (hasMarkdown(text)) {
+    return { text: markdownToTelegramHtml(text), parse_mode: 'HTML' };
+  }
+  return { text };
+}
+
 export function getToolDefinitions() {
   return [
     {
@@ -157,9 +222,10 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
       const { chat_id, text, reply_to_message_id, parse_mode } = args as {
         chat_id: number; text: string; reply_to_message_id?: number; parse_mode?: string;
       };
-      const sent = await bot.api.sendMessage(chat_id, text, {
+      const prepared = prepareOutgoing(text, parse_mode);
+      const sent = await bot.api.sendMessage(chat_id, prepared.text, {
         reply_parameters: reply_to_message_id ? { message_id: reply_to_message_id } : undefined,
-        parse_mode: parse_mode as 'HTML' | 'MarkdownV2' | undefined,
+        parse_mode: prepared.parse_mode,
       });
       saveMessage({
         telegram_message_id: sent.message_id,
@@ -180,9 +246,10 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     case 'telegram_reply': {
       const { chat_id, text, parse_mode } = args as { chat_id: number; text: string; parse_mode?: string };
       const lastMsgId = getLastIncomingMessageId(chat_id);
-      const sent = await bot.api.sendMessage(chat_id, text, {
+      const prepared = prepareOutgoing(text, parse_mode);
+      const sent = await bot.api.sendMessage(chat_id, prepared.text, {
         reply_parameters: lastMsgId ? { message_id: lastMsgId } : undefined,
-        parse_mode: parse_mode as 'HTML' | 'MarkdownV2' | undefined,
+        parse_mode: prepared.parse_mode,
       });
       saveMessage({
         telegram_message_id: sent.message_id,
