@@ -1,5 +1,25 @@
-import type { Bot } from 'grammy';
+import { InlineKeyboard, type Bot } from 'grammy';
 import type { ReactionTypeEmoji } from '@grammyjs/types';
+
+type ButtonSpec = { text: string; url?: string; callback?: string };
+type ButtonRows = ButtonSpec[][];
+
+function buildInlineKeyboard(rows: ButtonRows | undefined): InlineKeyboard | undefined {
+  if (!rows || rows.length === 0) return undefined;
+  const kb = new InlineKeyboard();
+  rows.forEach((row, ri) => {
+    if (ri > 0) kb.row();
+    for (const btn of row) {
+      const hasUrl = typeof btn.url === 'string' && btn.url.length > 0;
+      const hasCb = typeof btn.callback === 'string' && btn.callback.length > 0;
+      if (hasUrl && hasCb) throw new Error(`Button "${btn.text}": url and callback mutually exclusive`);
+      if (!hasUrl && !hasCb) throw new Error(`Button "${btn.text}": must have url or callback`);
+      if (hasUrl) kb.url(btn.text, btn.url!);
+      else kb.text(btn.text, btn.callback!);
+    }
+  });
+  return kb;
+}
 import { saveMessage, searchMessages, getRecent, listChats, getLastIncomingMessageId, listUsers } from './db.js';
 import { approveUser, denyUser, getTimezone, setTimezone } from './access.js';
 
@@ -68,6 +88,23 @@ function prepareOutgoing(text: string, explicitParseMode?: string): { text: stri
   return { text };
 }
 
+const buttonsSchema = {
+  type: 'array' as const,
+  description: 'Inline keyboard buttons as 2D array (rows). Each button: {text, url?} (URL button) or {text, callback?} (callback button). Exactly one of url/callback per button.',
+  items: {
+    type: 'array' as const,
+    items: {
+      type: 'object' as const,
+      properties: {
+        text: { type: 'string', description: 'Button label' },
+        url: { type: 'string', description: 'URL to open when clicked (URL button)' },
+        callback: { type: 'string', description: 'Callback data sent back when clicked (callback button, max 64 bytes)' },
+      },
+      required: ['text'],
+    },
+  },
+};
+
 export function getToolDefinitions() {
   return [
     {
@@ -80,6 +117,7 @@ export function getToolDefinitions() {
           text: { type: 'string', description: 'Message text' },
           reply_to_message_id: { type: 'number', description: 'Message ID to reply to (optional)' },
           parse_mode: { type: 'string', enum: ['HTML', 'MarkdownV2'], description: 'Parse mode (optional)' },
+          buttons: buttonsSchema,
         },
         required: ['chat_id', 'text'],
       },
@@ -93,6 +131,7 @@ export function getToolDefinitions() {
           chat_id: { type: 'number', description: 'Telegram chat ID' },
           text: { type: 'string', description: 'Reply text' },
           parse_mode: { type: 'string', enum: ['HTML', 'MarkdownV2'], description: 'Parse mode (optional)' },
+          buttons: buttonsSchema,
         },
         required: ['chat_id', 'text'],
       },
@@ -219,13 +258,15 @@ export function getToolDefinitions() {
 export async function handleToolCall(bot: Bot, name: string, args: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case 'telegram_send_message': {
-      const { chat_id, text, reply_to_message_id, parse_mode } = args as {
-        chat_id: number; text: string; reply_to_message_id?: number; parse_mode?: string;
+      const { chat_id, text, reply_to_message_id, parse_mode, buttons } = args as {
+        chat_id: number; text: string; reply_to_message_id?: number; parse_mode?: string; buttons?: ButtonRows;
       };
       const prepared = prepareOutgoing(text, parse_mode);
+      const kb = buildInlineKeyboard(buttons);
       const sent = await bot.api.sendMessage(chat_id, prepared.text, {
         reply_parameters: reply_to_message_id ? { message_id: reply_to_message_id } : undefined,
         parse_mode: prepared.parse_mode,
+        reply_markup: kb,
       });
       saveMessage({
         telegram_message_id: sent.message_id,
@@ -244,12 +285,16 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     }
 
     case 'telegram_reply': {
-      const { chat_id, text, parse_mode } = args as { chat_id: number; text: string; parse_mode?: string };
+      const { chat_id, text, parse_mode, buttons } = args as {
+        chat_id: number; text: string; parse_mode?: string; buttons?: ButtonRows;
+      };
       const lastMsgId = getLastIncomingMessageId(chat_id);
       const prepared = prepareOutgoing(text, parse_mode);
+      const kb = buildInlineKeyboard(buttons);
       const sent = await bot.api.sendMessage(chat_id, prepared.text, {
         reply_parameters: lastMsgId ? { message_id: lastMsgId } : undefined,
         parse_mode: prepared.parse_mode,
+        reply_markup: kb,
       });
       saveMessage({
         telegram_message_id: sent.message_id,
