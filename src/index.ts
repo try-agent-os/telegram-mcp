@@ -18,6 +18,18 @@ const PORT = parseInt(process.env.PORT ?? '3848', 10);
 const activeSessions = new Map<string, Server>();
 
 function getLocalISO(tz: string): string {
+  return getTimeMetadata(tz).local_date;
+}
+
+// saga #513: emit redundant time fields so LLMs never have to do timezone math.
+// epoch = unix seconds (canonical for arithmetic), utc_date = `Z`-suffixed ISO,
+// local_date = ISO with offset, local_human = short readable form with abbrev.
+function getTimeMetadata(tz: string): {
+  epoch: string;
+  utc_date: string;
+  local_date: string;
+  local_human: string;
+} {
   const now = new Date();
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz,
@@ -27,10 +39,25 @@ function getLocalISO(tz: string): string {
     timeZoneName: 'longOffset',
   }).formatToParts(now);
   const p = (type: string) => parts.find(p => p.type === type)!.value;
-  // timeZoneName: 'longOffset' gives "GMT+01:00" or "GMT"
   const gmtOffset = parts.find(p => p.type === 'timeZoneName')?.value ?? 'GMT';
   const offset = gmtOffset === 'GMT' ? '+00:00' : gmtOffset.replace('GMT', '');
-  return `${p('year')}-${p('month')}-${p('day')}T${p('hour')}:${p('minute')}:${p('second')}${offset}`;
+  const local_date = `${p('year')}-${p('month')}-${p('day')}T${p('hour')}:${p('minute')}:${p('second')}${offset}`;
+
+  const humanParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+    timeZoneName: 'short',
+  }).formatToParts(now);
+  const hp = (type: string) => humanParts.find(p => p.type === type)?.value ?? '';
+  const local_human = `${hp('weekday')} ${hp('year')}-${hp('month')}-${hp('day')} ${hp('hour')}:${hp('minute')} ${hp('timeZoneName')}`;
+
+  return {
+    epoch: String(Math.floor(now.getTime() / 1000)),
+    utc_date: now.toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    local_date,
+    local_human,
+  };
 }
 
 function createMcpServer(bot: Bot): Server {
@@ -128,7 +155,7 @@ async function main() {
               media_type: mediaType ?? '',
               is_forward: isForward ? 'true' : 'false',
               forward_from: forwardFrom ?? '',
-              local_date: getLocalISO(tz),
+              ...getTimeMetadata(tz),
               timezone: tz,
             },
           },
@@ -160,7 +187,7 @@ async function main() {
               reaction_action: action,
               user: username ?? String(chatId),
               user_id: event.userId ? String(event.userId) : String(chatId),
-              local_date: getLocalISO(event.userId ? getTimezone(event.userId) : getTimezone(chatId)),
+              ...getTimeMetadata(event.userId ? getTimezone(event.userId) : getTimezone(chatId)),
               timezone: event.userId ? getTimezone(event.userId) : getTimezone(chatId),
             },
           },
