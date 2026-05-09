@@ -271,6 +271,8 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
       saveMessage({
         telegram_message_id: sent.message_id,
         chat_id,
+        chat_type: null,
+        chat_title: null,
         user_id: null,
         username: null,
         display_name: 'Bot',
@@ -299,6 +301,8 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
       saveMessage({
         telegram_message_id: sent.message_id,
         chat_id,
+        chat_type: null,
+        chat_title: null,
         user_id: null,
         username: null,
         display_name: 'Bot',

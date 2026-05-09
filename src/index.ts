@@ -121,12 +121,13 @@ async function main() {
 
   // Handle incoming Telegram messages — push to all connected Claude sessions
   onIncomingMessage((event) => {
-    const { userId, chatId, text, username, displayName, messageId, replyToMessageId, quotedText, mediaType, isForward, forwardFrom } = event;
+    const { userId, chatId, chatType, chatTitle, text, username, displayName, messageId, replyToMessageId, quotedText, mediaType, isForward, forwardFrom } = event;
     const from = username ? `@${username}` : displayName ?? 'Unknown';
     const replyInfo = replyToMessageId ? ` [reply to msg ${replyToMessageId}${quotedText ? ` quoted: "${quotedText.slice(0, 40)}"` : ''}]` : '';
     const typeInfo = mediaType ? ` [${mediaType}]` : '';
     const fwdInfo = isForward && forwardFrom ? ` [fwd from: ${forwardFrom}]` : '';
-    console.log(`[Telegram] ${from}${typeInfo}${fwdInfo} (chat ${chatId}, msg ${messageId}${replyInfo}):\n> ${text}`);
+    const chatLabel = chatType === 'private' ? `chat ${chatId}` : `${chatType} ${chatId}${chatTitle ? ` "${chatTitle}"` : ''}`;
+    console.log(`[Telegram] ${from}${typeInfo}${fwdInfo} (${chatLabel}, msg ${messageId}${replyInfo}):\n> ${text}`);
 
     // Build content with reply/forward/quote context
     let content = text;
@@ -135,6 +136,12 @@ async function main() {
       content = `[reply to msg_id=${replyToMessageId}${quoteSuffix}] ${content}`;
     }
     if (isForward && forwardFrom) content = `[forwarded from ${forwardFrom}] ${content}`;
+    // For group/supergroup messages prefix the speaker so the agent can
+    // distinguish between members in a multi-person chat. Private chats keep
+    // the existing terse format (the chat_id == user_id, single speaker).
+    if (chatType !== 'private') {
+      content = `[${from}${chatTitle ? ` in "${chatTitle}"` : ''}] ${content}`;
+    }
 
     const tz = getTimezone(userId);
 
@@ -147,11 +154,13 @@ async function main() {
             content,
             meta: {
               chat_id: String(chatId),
+              chat_type: chatType,
+              chat_title: chatTitle ?? '',
               message_id: String(messageId),
               reply_to_message_id: replyToMessageId ? String(replyToMessageId) : '',
               quoted_text: quotedText ?? '',
               user: username ?? String(chatId),
-              user_id: String(chatId),
+              user_id: String(userId),
               media_type: mediaType ?? '',
               is_forward: isForward ? 'true' : 'false',
               forward_from: forwardFrom ?? '',

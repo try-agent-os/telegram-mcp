@@ -5,9 +5,9 @@ import https from 'https';
 import path from 'path';
 import { checkAccess, touchUser } from './access.js';
 import { createCommands } from './commands/index.js';
-import { saveMessage } from './db.js';
+import { getUser, saveMessage } from './db.js';
 import { extractMediaUrl, processUrl, processVideo, transcribeVoice } from './media-pipeline.js';
-import type { IncomingMessageEvent, MediaType } from './types.js';
+import type { ChatType, IncomingMessageEvent, MediaType } from './types.js';
 
 export interface ReactionEvent {
   chatId: number;
@@ -118,17 +118,53 @@ export function createBot(token: string, options?: BotOptions): Bot {
   function getBaseFields(msg: Message) {
     const userId = msg.from!.id;
     const chatId = msg.chat.id;
+    const chatType = msg.chat.type as ChatType;
+    // Group/supergroup/channel chats expose `title`; private chats expose only
+    // first_name/last_name on the chat object (we already capture those via from.*).
+    const chatTitle =
+      chatType === 'private'
+        ? null
+        : (msg.chat as { title?: string }).title ?? null;
     const username = msg.from?.username ?? null;
     const displayName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || null;
     const isForward = !!msg.forward_origin;
     const forwardFrom = getForwardFrom(msg.forward_origin);
-    return { userId, chatId, username, displayName, isForward, forwardFrom };
+    return { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom };
+  }
+
+  // Gate per-user access ONLY in private chats. In groups/supergroups/channels
+  // the bot's mere presence (added by an admin) is treated as implicit access:
+  // - Don't auto-create new user records as 'pending' for every group member
+  //   who happens to send a message.
+  // - Never reply with "Access request submitted" or "Access denied" inside a
+  //   group — that would spam the chat. Just drop the message silently.
+  // - Do still respect an explicit 'denied' status if the user has one (set
+  //   manually via /deny in private earlier) to allow per-person blocks.
+  // Returns true if the handler should continue processing the message.
+  async function gateAccess(ctx: Context, userId: number, chatType: ChatType): Promise<boolean> {
+    if (chatType === 'private') {
+      const access = checkAccess(userId);
+      if (access === 'denied') return false;
+      if (access === 'pending') {
+        await ctx.reply('Access request submitted. Please wait for approval.');
+        return false;
+      }
+      return true;
+    }
+    // Non-private: only block users with a pre-existing 'denied' record.
+    // Don't auto-create a record (that would mark every group member as pending
+    // and pollute the users table).
+    const existing = getUser(userId);
+    if (existing && existing.status === 'denied') return false;
+    return true;
   }
 
   function dispatchEvent(event: IncomingMessageEvent): void {
     saveMessage({
       telegram_message_id: event.messageId,
       chat_id: event.chatId,
+      chat_type: event.chatType,
+      chat_title: event.chatTitle,
       user_id: null,
       username: event.username,
       display_name: event.displayName,
@@ -159,6 +195,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
     isForward: boolean;
     forwardFrom: string | null;
     chatId: number;
+    chatType: ChatType;
+    chatTitle: string | null;
   }
 
   interface TextBatch {
@@ -186,6 +224,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
     dispatchEvent({
       userId: last.userId,
       chatId: last.chatId,
+      chatType: last.chatType,
+      chatTitle: last.chatTitle,
       text,
       username: last.username,
       displayName: last.displayName,
@@ -203,16 +243,11 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
   bot.on('message:text', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
-    const access = checkAccess(userId);
-    if (access === 'denied') return;
-    if (access === 'pending') {
-      await ctx.reply('Access request submitted. Please wait for approval.');
-      return;
-    }
+    if (!await gateAccess(ctx, userId, chatType)) return;
 
-    touchUser(userId, username, displayName);
+    if (chatType === 'private') touchUser(userId, username, displayName);
 
     const buffered: BufferedTextMsg = {
       text: msg.text!,
@@ -225,6 +260,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
       isForward,
       forwardFrom,
       chatId,
+      chatType,
+      chatTitle,
     };
 
     const key = `${chatId}:${userId}`;
@@ -242,11 +279,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Voice messages
   bot.on('message:voice', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
-    const access = checkAccess(userId);
-    if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
+    if (!await gateAccess(ctx, userId, chatType)) return;
 
     const voice = msg.voice!;
     const caption = msg.caption ?? null;
@@ -270,7 +305,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     }
 
     dispatchEvent({
-      userId, chatId, text, username, displayName,
+      userId, chatId, chatType, chatTitle, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
@@ -282,11 +317,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Video notes (round videos)
   bot.on('message:video_note', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
-    const access = checkAccess(userId);
-    if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
+    if (!await gateAccess(ctx, userId, chatType)) return;
 
     const vn = msg.video_note!;
     let filePath: string | null = null;
@@ -302,7 +335,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     }
 
     dispatchEvent({
-      userId, chatId, text, username, displayName,
+      userId, chatId, chatType, chatTitle, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
@@ -314,11 +347,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Photos
   bot.on('message:photo', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
-    const access = checkAccess(userId);
-    if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
+    if (!await gateAccess(ctx, userId, chatType)) return;
 
     const photos = msg.photo!;
     const largest = photos[photos.length - 1]; // highest resolution
@@ -335,7 +366,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     }
 
     dispatchEvent({
-      userId, chatId, text, username, displayName,
+      userId, chatId, chatType, chatTitle, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
@@ -347,11 +378,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Documents (PDF, files, etc.)
   bot.on('message:document', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
-    const access = checkAccess(userId);
-    if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
+    if (!await gateAccess(ctx, userId, chatType)) return;
 
     const doc = msg.document!;
     const caption = msg.caption ?? null;
@@ -373,7 +402,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     }
 
     dispatchEvent({
-      userId, chatId, text, username, displayName,
+      userId, chatId, chatType, chatTitle, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
@@ -385,11 +414,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Videos
   bot.on('message:video', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
-    const access = checkAccess(userId);
-    if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
+    if (!await gateAccess(ctx, userId, chatType)) return;
 
     const video = msg.video!;
     const caption = msg.caption ?? null;
@@ -414,7 +441,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     }
 
     dispatchEvent({
-      userId, chatId, text, username, displayName,
+      userId, chatId, chatType, chatTitle, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
@@ -426,18 +453,16 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Stickers
   bot.on('message:sticker', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
 
-    const access = checkAccess(userId);
-    if (access === 'denied') return;
-    if (access === 'pending') { await ctx.reply('Access denied.'); return; }
+    if (!await gateAccess(ctx, userId, chatType)) return;
 
     const sticker = msg.sticker!;
     const emoji = sticker.emoji ?? '?';
     const text = `[sticker: ${emoji}]`;
 
     dispatchEvent({
-      userId, chatId, text, username, displayName,
+      userId, chatId, chatType, chatTitle, text, username, displayName,
       messageId: msg.message_id,
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
@@ -458,10 +483,13 @@ export function createBot(token: string, options?: BotOptions): Bot {
       ? [user.first_name, user.last_name].filter(Boolean).join(' ') || null
       : null;
 
-    // Skip if user not in allowlist (anonymous reactions have no user)
+    // Skip if user not in allowlist (anonymous reactions have no user).
+    // Use a read-only check (getUser, not checkAccess) so we don't auto-create
+    // 'pending' records for every group member who reacts to a message — that
+    // would pollute the users table when the bot sits in a group of dozens.
     if (userId !== null) {
-      const access = checkAccess(userId);
-      if (access === 'denied') return;
+      const existing = getUser(userId);
+      if (existing && existing.status === 'denied') return;
     }
 
     if (!reactionCallback) return;

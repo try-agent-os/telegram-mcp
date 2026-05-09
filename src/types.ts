@@ -1,9 +1,13 @@
 export type MediaType = 'voice' | 'video_note' | 'photo' | 'document' | 'video' | 'sticker' | 'url';
 
+export type ChatType = 'private' | 'group' | 'supergroup' | 'channel';
+
 export interface TelegramMessage {
   id: number;
   telegram_message_id: number;
   chat_id: number;
+  chat_type: ChatType | null;
+  chat_title: string | null;
   user_id: number | null;
   username: string | null;
   display_name: string | null;
@@ -19,6 +23,8 @@ export interface TelegramMessage {
 export interface IncomingMessageEvent {
   userId: number;
   chatId: number;
+  chatType: ChatType;
+  chatTitle: string | null;
   text: string;
   username: string | null;
   displayName: string | null;

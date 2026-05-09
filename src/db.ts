@@ -74,6 +74,15 @@ export function initDb(): void {
   if (!colNames.includes('file_name')) {
     db.exec(`ALTER TABLE messages ADD COLUMN file_name TEXT`);
   }
+  // Group/supergroup support — track chat type so the channel-push consumer can
+  // distinguish private DMs from group/supergroup conversations and surface
+  // chat title in the agent UI.
+  if (!colNames.includes('chat_type')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN chat_type TEXT`);
+  }
+  if (!colNames.includes('chat_title')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN chat_title TEXT`);
+  }
 
   // Insert default settings if missing
   db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('default_policy', 'pending')`).run();
@@ -120,11 +129,13 @@ function migrateFromAccessJson(): void {
 
 export function saveMessage(msg: Omit<TelegramMessage, 'id' | 'created_at'>): TelegramMessage {
   const stmt = db.prepare(`
-    INSERT INTO messages (telegram_message_id, chat_id, user_id, username, display_name, text, direction, reply_to_message_id, media_type, file_path, file_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (telegram_message_id, chat_id, chat_type, chat_title, user_id, username, display_name, text, direction, reply_to_message_id, media_type, file_path, file_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = stmt.run(
-    msg.telegram_message_id, msg.chat_id, msg.user_id,
+    msg.telegram_message_id, msg.chat_id,
+    msg.chat_type ?? null, msg.chat_title ?? null,
+    msg.user_id,
     msg.username, msg.display_name, msg.text,
     msg.direction, msg.reply_to_message_id,
     msg.media_type ?? null, msg.file_path ?? null, msg.file_name ?? null
