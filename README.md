@@ -94,6 +94,32 @@ Default policy for unknown users is configurable (`pending` / `allow` / `deny`).
 
 When an allowed user sends a message, the MCP server emits a notification on stdio so Claude Code (or any MCP client supporting channel push) can react in real time. Payload includes message text, author, chat, local time in the user's timezone, and any transcription result.
 
+Group / supergroup messages include `chat_type` (`group` / `supergroup`) and `chat_title` in the meta payload, and the content is prefixed with `[@speaker in "Chat Title"]` so the agent can disambiguate multiple speakers in a single conversation.
+
+## Group and supergroup chats
+
+The bot works in Telegram groups and supergroups, not just private DMs.
+
+**Engagement policy.** To avoid spamming a group full of humans, the bot only forwards a message to the connected Claude Code session ("notifies the agent") when one of the following is true:
+
+1. The message contains an `@<bot_username>` mention (either typed `mention` or clicked-from-list `text_mention` entity).
+2. The message is a reply to one of the bot's own previous messages.
+3. The message is a slash command (`/status`, `/help`, …, including the `/cmd@botname` form).
+
+All other group messages are silently ingested into `messages.db` (so the agent has full chat-history context when it IS addressed later) but no `claude/channel` notification is emitted.
+
+Private chats keep the legacy behaviour — every message notifies the agent. Channel posts are persisted but never trigger a notification (no real conversation expected there).
+
+**BotFather privacy mode.** Telegram's default for new bots is "privacy mode ON", which means the bot only receives messages that mention it, reply to its messages, or are slash commands — exactly the same subset this code engages on. If you want the bot to also receive (and silently ingest) every other group message for history context, disable privacy mode:
+
+```
+/setprivacy → @your_bot → Disable
+```
+
+in a chat with @BotFather. With privacy mode left on, ingestion is limited to messages the bot was already going to engage with, so the silent-history-context feature is effectively a no-op — but everything else works.
+
+**Access control in groups.** The per-user allow/pending/deny gate runs in private chats only. In a group the bot's mere presence (it was added by an admin) is treated as implicit access for every member; only an explicit pre-existing `denied` record blocks a particular user. This keeps the users table from filling up with `pending` rows for every group member who happens to send a message.
+
 ## Project layout
 
 ```
@@ -102,13 +128,24 @@ src/
   bot.ts            — grammY setup, message handlers, channel push
   db.ts             — SQLite schema, CRUD, FTS5 search
   access.ts         — access policy (allowlist/pending/deny)
+  group-policy.ts   — pure mention/reply/slash-command detector for group chats
   tools.ts          — MCP tool definitions
   media-pipeline.ts — voice/URL → whisper transcription
   commands/         — /help, /id, /status, /tz bot commands
   types.ts          — shared types
+tests/
+  group-policy.test.ts — node:test unit tests for the group engagement policy
 deploy/
   com.novostudio.telegram-mcp.plist — launchd template (macOS)
 ```
+
+## Tests
+
+```bash
+npm test
+```
+
+Runs `node:test` against `tests/*.test.ts` via tsx. Currently covers the group / supergroup engagement policy (mention, reply-to-bot, and slash-command detection).
 
 ## License
 
