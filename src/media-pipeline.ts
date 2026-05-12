@@ -1,12 +1,18 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync, readdirSync, unlinkSync } from 'fs';
+import { mkdirSync, readdirSync, unlinkSync, openAsBlob } from 'fs';
+import { stat } from 'fs/promises';
 import path from 'path';
 import { nodewhisper } from 'nodejs-whisper';
 
 const execFileP = promisify(execFile);
 
-const MEDIA_DIR = '/tmp/telegram-mcp';
+const MEDIA_DIR = process.env.TELEGRAM_MCP_MEDIA_DIR ?? '/tmp/telegram-mcp';
+const WHISPER_MODEL = process.env.WHISPER_MODEL ?? 'medium';
+// When set, transcription is routed via HTTP to a long-running whisper-server
+// (model resident in RAM — saves the ~1-3s model-load on every call). When unset,
+// falls back to spawning whisper-cli per call via nodejs-whisper.
+const WHISPER_SERVER_URL = process.env.WHISPER_SERVER_URL ?? '';
 
 function ensureMediaDir(): void {
   try {
@@ -25,21 +31,47 @@ function parseWhisperOutput(raw: string): string {
   return segments.join(' ').trim();
 }
 
+async function transcribeViaServer(filePath: string): Promise<string | null> {
+  const url = `${WHISPER_SERVER_URL.replace(/\/$/, '')}/inference`;
+  const filename = path.basename(filePath);
+  const stats = await stat(filePath);
+  // whisper-server expects multipart/form-data with field name "file".
+  // `language=auto` mirrors the CLI default; temperature=0 makes it deterministic.
+  // openAsBlob (Node >=19.8) avoids buffering the whole audio into JS heap.
+  const blob = await openAsBlob(filePath);
+  const form = new FormData();
+  form.append('file', blob, filename);
+  form.append('language', 'auto');
+  form.append('response_format', 'text');
+  form.append('temperature', '0');
+  const res = await fetch(url, { method: 'POST', body: form });
+  if (!res.ok) {
+    throw new Error(`whisper-server ${res.status}: ${await res.text()} (file ${filename}, ${stats.size}B)`);
+  }
+  const text = (await res.text()).trim();
+  return text || null;
+}
+
+async function transcribeViaCli(filePath: string): Promise<string | null> {
+  const raw = await nodewhisper(filePath, {
+    modelName: WHISPER_MODEL,
+    whisperOptions: {
+      outputInText: false,
+      outputInSrt: false,
+      outputInVtt: false,
+      outputInJson: false,
+      translateToEnglish: false,
+      wordTimestamps: false,
+    },
+  });
+  return parseWhisperOutput(raw) || null;
+}
+
 async function transcribeAudio(filePath: string): Promise<string | null> {
   try {
-    const raw = await nodewhisper(filePath, {
-      modelName: 'medium',
-      whisperOptions: {
-        outputInText: false,
-        outputInSrt: false,
-        outputInVtt: false,
-        outputInJson: false,
-        translateToEnglish: false,
-        wordTimestamps: false,
-      },
-    });
-    const text = parseWhisperOutput(raw);
-    return text || null;
+    return WHISPER_SERVER_URL
+      ? await transcribeViaServer(filePath)
+      : await transcribeViaCli(filePath);
   } catch (err) {
     console.error('[whisper] transcription error:', (err as Error).message);
     return null;

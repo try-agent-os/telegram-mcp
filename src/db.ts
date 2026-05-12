@@ -242,6 +242,37 @@ export function listUsers(status?: string): UserRecord[] {
   return db.prepare('SELECT * FROM users ORDER BY updated_at DESC').all() as UserRecord[];
 }
 
+// Seed admin user IDs as 'allowed'. Idempotent — existing rows get upgraded
+// from 'pending'/'denied' to 'allowed'. Called once at startup from env
+// (TELEGRAM_ADMIN_USER_IDS, comma-separated) so a fresh install grants the
+// wizard-detected admins access without a manual `/approve` round-trip.
+export function seedAdmins(userIds: number[], usernames: string[] = []): void {
+  if (userIds.length === 0) return;
+  const tx = db.transaction(() => {
+    for (let i = 0; i < userIds.length; i++) {
+      const uid = userIds[i];
+      const uname = usernames[i] ?? null;
+      const existing = getUser(uid);
+      if (existing) {
+        if (existing.status !== 'allowed') {
+          db.prepare('UPDATE users SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?')
+            .run('allowed', uid);
+        }
+        if (uname && existing.username !== uname) {
+          db.prepare('UPDATE users SET username = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?')
+            .run(uname, uid);
+        }
+      } else {
+        db.prepare(`
+          INSERT INTO users (user_id, username, display_name, status, timezone)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(uid, uname, null, 'allowed', DEFAULT_TIMEZONE);
+      }
+    }
+  });
+  tx();
+}
+
 // --- Settings ---
 
 export function getSetting(key: string): string | null {
