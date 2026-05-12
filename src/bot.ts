@@ -25,7 +25,7 @@ export interface ReactionEvent {
   userId: number | null;
 }
 
-const MEDIA_DIR = '/tmp/telegram-mcp';
+const MEDIA_DIR = process.env.TELEGRAM_MCP_MEDIA_DIR ?? '/tmp/telegram-mcp';
 
 let messageCallback: ((event: IncomingMessageEvent) => void) | null = null;
 let reactionCallback: ((event: ReactionEvent) => void) | null = null;
