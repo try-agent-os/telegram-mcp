@@ -98,12 +98,31 @@ export function isSlashCommand(msg: PolicyMessage): boolean {
 }
 
 /**
+ * Optional engagement context for `shouldNotifyAgent`.
+ *
+ *  - `chatId`       — the Telegram chat id of the incoming message; required if
+ *                     `alwaysEngage` is supplied so it can be matched against
+ *                     the override set.
+ *  - `alwaysEngage` — set of group/supergroup chat ids where the bot should
+ *                     notify on EVERY message (bypassing the mention / reply /
+ *                     slash policy). Channels are still excluded — broadcast
+ *                     posts are never treated as conversation. Use sparingly:
+ *                     this is the "I trust this room, page me on everything"
+ *                     escape hatch; default behaviour stays addressed-only.
+ */
+export interface EngagementContext {
+  chatId?: number;
+  alwaysEngage?: ReadonlySet<number>;
+}
+
+/**
  * Decide whether to push a channel notification to the connected Claude Code
  * session.
  *
  *  - Private chats: always notify (every message is for the bot).
  *  - Channels: never notify (broadcast posts, no real conversation expected).
- *  - Group / supergroup: notify only if the bot is explicitly addressed.
+ *  - Group / supergroup: notify only if the bot is explicitly addressed,
+ *    OR if the chat id is in the `alwaysEngage` override set.
  *
  * Even when this returns `false` the caller should still persist the message
  * to the local message store so future agent invocations have history.
@@ -112,9 +131,17 @@ export function shouldNotifyAgent(
   chatType: ChatType,
   msg: PolicyMessage,
   bot: BotIdentity,
+  context?: EngagementContext,
 ): boolean {
   if (chatType === 'private') return true;
   if (chatType === 'channel') return false;
+  if (
+    context?.alwaysEngage &&
+    context.chatId !== undefined &&
+    context.alwaysEngage.has(context.chatId)
+  ) {
+    return true;
+  }
   return (
     isMentionedInText(msg, bot) ||
     isReplyToBot(msg, bot) ||
