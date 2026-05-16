@@ -4,6 +4,7 @@ import tz from './tz.js';
 import { createStatusCommand } from './status.js';
 import id from './id.js';
 import help from './help.js';
+import whoami from './whoami.js';
 
 export function createCommands(options?: BotOptions): Composer<Context> {
   const commands = new Composer<Context>();
@@ -11,5 +12,6 @@ export function createCommands(options?: BotOptions): Composer<Context> {
   commands.use(createStatusCommand(options));
   commands.use(id);
   commands.use(help);
+  commands.use(whoami);
   return commands;
 }
