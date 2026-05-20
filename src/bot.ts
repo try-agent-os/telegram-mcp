@@ -135,7 +135,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
     const displayName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || null;
     const isForward = !!msg.forward_origin;
     const forwardFrom = getForwardFrom(msg.forward_origin);
-    return { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom };
+    const isForum = !!(msg.chat as { is_forum?: boolean }).is_forum;
+    const messageThreadId = msg.message_thread_id ?? null;
+    return { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId };
   }
 
   // Adapter: turn a grammY/Bot-API Message into the framework-agnostic shape
@@ -241,6 +243,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
     chatId: number;
     chatType: ChatType;
     chatTitle: string | null;
+    messageThreadId: number | null;
+    isForum: boolean;
     // Per-message group-policy verdict. The batch as a whole notifies the
     // agent if ANY of its parts was addressed to the bot (mention / reply /
     // slash command). This handles the share+caption pattern where the
@@ -288,12 +292,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       isForward: last.isForward,
       forwardFrom: last.forwardFrom,
       caption: null,
+      messageThreadId: last.messageThreadId,
+      isForum: last.isForum,
     }, notify);
   }
 
   bot.on('message:text', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -321,6 +327,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
       chatId,
       chatType,
       chatTitle,
+      messageThreadId,
+      isForum,
       notify,
     };
 
@@ -339,7 +347,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Voice messages
   bot.on('message:voice', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -376,13 +384,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'voice', filePath, fileName: null,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Video notes (round videos)
   bot.on('message:video_note', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -411,13 +420,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'video_note', filePath, fileName: null,
       isForward, forwardFrom, caption: null,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Photos
   bot.on('message:photo', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -447,13 +457,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'photo', filePath, fileName: null,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Documents (PDF, files, etc.)
   bot.on('message:document', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -488,13 +499,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'document', filePath, fileName: originalName,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Videos
   bot.on('message:video', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -532,13 +544,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'video', filePath, fileName: video.file_name ?? null,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Stickers
   bot.on('message:sticker', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -558,6 +571,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'sticker', filePath: null, fileName: null,
       isForward, forwardFrom, caption: null,
+      messageThreadId, isForum,
     }, notify);
   });
 
