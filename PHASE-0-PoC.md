@@ -45,9 +45,9 @@ Tools:
 
 Uses `createSdkMcpServer()` + `tool()` from Agent SDK — no separate process or port needed.
 
-### 4. Door 1 entrypoint (`src/door1.ts`)
+### 4. Door 1 entrypoint (`src/main.ts`)
 
-`TELEGRAM_BOT_TOKEN=... npx tsx src/door1.ts`
+`TELEGRAM_BOT_TOKEN=... npx tsx src/main.ts`
 
 - Starts grammY bot as root process
 - Creates in-process MCP tools
