@@ -1,6 +1,6 @@
 # Phase 0 PoC — Watchdog + Agent SDK Runner
 
-Status: **working** (unit tests pass, integration pending)
+Status: **working** (11 unit + 2 integration tests pass)
 Branch: `phase-0-watchdog`
 Date: 2026-05-20
 
@@ -22,9 +22,9 @@ Interval-based silence detector. Tracks time since last trackable event in the S
 - Check interval: `max(100, min(1000, threshold/3))` ms
 - Trackable events: `assistant`, `user`, `result`, `system`, `partial_message`, `status`, `tool_use_summary`, `rate_limit`, `api_retry`
 
-### 2. SDK Runner (`src/sdk-runner.ts`)
+### 2. SDK Runner (`src/sdk-runner.ts`) — one-shot queries
 
-`runWithWatchdog(prompt, options)` — runs a Claude query with watchdog supervision.
+`runWithWatchdog(prompt, options)` — runs a single Claude query with watchdog supervision.
 
 - Spawns Claude via `query()` from `@anthropic-ai/claude-agent-sdk`
 - Iterates the async stream, feeding events to watchdog
@@ -33,6 +33,22 @@ Interval-based silence detector. Tracks time since last trackable event in the S
 - Captures `session_id` from `system/init` message
 - Supports in-process MCP tools via `mcpServers` option
 - Sets `allowDangerouslySkipPermissions: true` when `bypassPermissions` mode is used
+
+### 2b. SessionRunner (`src/session-runner.ts`) — persistent multi-turn
+
+`new SessionRunner(options)` — maintains a long-lived query session.
+
+- `start(prompt, resumeSessionId?)` — starts or resumes a query
+- `sendMessage(text)` — feeds new messages via `q.streamInput()` (no new query per message)
+- `close()` — terminates the session
+- EventEmitter: `sessionStart`, `result`, `message`, `silence`, `error`, `closed`
+- Watchdog monitors the entire session lifecycle, not just a single turn
+
+### 2c. Session Store (`src/session-store.ts`)
+
+Persists session_id to `.session-state.json` for resume after process restart.
+
+- `saveSessionId(id)` / `loadSessionId()` / `clearSessionId()`
 
 ### 3. In-process SDK-MCP tools (`src/sdk-mcp-tools.ts`)
 
@@ -50,20 +66,18 @@ Uses `createSdkMcpServer()` + `tool()` from Agent SDK — no separate process or
 `TELEGRAM_BOT_TOKEN=... npx tsx src/main.ts`
 
 - Starts grammY bot as root process
-- Creates in-process MCP tools
-- On incoming message: queues prompt, runs `runWithWatchdog()`
-- Logs session lifecycle, watchdog events, results
+- Creates in-process MCP tools + SessionRunner
+- First message: starts session (or resumes from saved session_id)
+- Subsequent messages: fed via `sendMessage()` → `streamInput()`
+- On error: closes session, clears state, starts fresh
 
 ### 5. Tests
 
-**Unit tests** (`tests/sdk-runner.test.ts`): 7/7 pass
-- Watchdog regular events (no false trigger)
-- Watchdog silence detection
-- Watchdog reset + re-detection
-- Event type mapping
-- Trackable event classification
+**Unit tests** (11 total, all pass):
+- `tests/sdk-runner.test.ts` (7): watchdog events, silence detection, reset, event mapping
+- `tests/session-runner.test.ts` (4): simulated hang detection, session store save/load/clear
 
-**Integration test** (`tests/sdk-integration.test.ts`): requires Claude auth
+**Integration test** (`tests/sdk-integration.test.ts`): 2/2 pass (requires Claude auth)
 - Basic query completes with session_id and result
 - AbortController works mid-query
 
@@ -75,14 +89,14 @@ Uses `createSdkMcpServer()` + `tool()` from Agent SDK — no separate process or
 - [x] SDK runner abort+resume loop
 - [x] In-process MCP tools register with correct types
 - [x] Door 1 entrypoint wires everything together
-- [x] All unit tests pass
+- [x] All 11 unit + 2 integration tests pass
+- [x] SessionRunner with streamInput() multi-turn
+- [x] Session persistence (save/load/clear session_id)
+- [x] Simulated hang test (fake stream stall → watchdog abort)
 
 ## What's not tested yet
 
 - [ ] End-to-end with real bot token (need token from Vasily)
-- [ ] Resume after process restart (need to persist session_id)
-- [ ] Watchdog trigger on real SDK hang (simulated hang test todo)
-- [ ] `streamInput()` for multi-message conversations (current: one prompt per query)
 
 ## Key findings
 
@@ -94,7 +108,4 @@ Uses `createSdkMcpServer()` + `tool()` from Agent SDK — no separate process or
 ## Next steps
 
 1. Get bot token for end-to-end test
-2. Add `streamInput()` support for multi-turn conversations
-3. Persist session_id for resume after restart
-4. Add simulated hang test (monkey-patch delay)
-5. Auth relay (OAuth `/login` URL forwarding to Telegram chat)
+2. Auth relay (OAuth `/login` URL forwarding to Telegram chat)
