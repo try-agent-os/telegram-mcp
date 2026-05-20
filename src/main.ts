@@ -3,6 +3,7 @@
  *
  * Telegram bot is the root process. Spawns Claude via Agent SDK.
  * Watchdog monitors stream silence and aborts+resumes on hang.
+ * Multi-turn: new messages fed into running session via streamInput().
  *
  * Usage: TELEGRAM_BOT_TOKEN=... npx tsx src/main.ts
  *        or: node dist/main.js (after tsc)
@@ -10,9 +11,9 @@
 import 'dotenv/config';
 import { createBot, onIncomingMessage } from './bot.js';
 import { initDb, seedAdmins } from './db.js';
-import { runWithWatchdog } from './sdk-runner.js';
+import { SessionRunner } from './session-runner.js';
 import { createTelegramMcpTools } from './sdk-mcp-tools.js';
-import type { SilenceInfo } from './watchdog.js';
+import { loadSessionId, saveSessionId, clearSessionId } from './session-store.js';
 
 const SILENCE_THRESHOLD_MS = parseInt(process.env.WATCHDOG_SILENCE_MS ?? '60000', 10);
 
@@ -36,69 +37,78 @@ async function main() {
 
   const startTime = Date.now();
   const bot = createBot(token, {
-    getSessionCount: () => 1,
+    getSessionCount: () => session.isActive ? 1 : 0,
     getUptime: () => (Date.now() - startTime) / 1000,
   });
 
   const telegramMcp = createTelegramMcpTools(bot);
 
-  let currentSessionId: string | undefined;
-  let messageQueue: string[] = [];
-  let isRunning = false;
+  const session = new SessionRunner({
+    silenceThresholdMs: SILENCE_THRESHOLD_MS,
+    maxTurns: 50,
+    permissionMode: 'bypassPermissions',
+    mcpServer: telegramMcp,
+    allowedTools: ['mcp__telegram__*', 'Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'],
+  });
 
-  onIncomingMessage((event) => {
+  session.on('sessionStart', (sid) => {
+    saveSessionId(sid);
+    console.log(`[main] Session persisted: ${sid}`);
+  });
+
+  session.on('result', (msg: any) => {
+    if (msg.subtype === 'success' && msg.result) {
+      console.log(`[main] Claude result: ${msg.result.slice(0, 200)}`);
+    }
+  });
+
+  session.on('silence', (info) => {
+    console.log(`[main] Watchdog: ${info.silenceDurationMs}ms silence after ${info.lastEventType}`);
+  });
+
+  session.on('closed', () => {
+    console.log('[main] Session closed');
+  });
+
+  session.on('error', (err) => {
+    console.error('[main] Session error:', err.message);
+  });
+
+  let firstMessage = true;
+
+  onIncomingMessage(async (event) => {
     const { text, username, displayName, chatId } = event;
     const from = username ? `@${username}` : displayName ?? 'Unknown';
     console.log(`[main] Incoming from ${from} in chat ${chatId}: ${text}`);
 
-    messageQueue.push(text);
+    try {
+      if (!session.isActive) {
+        const savedSessionId = firstMessage ? loadSessionId() : undefined;
+        firstMessage = false;
 
-    if (!isRunning) {
-      processQueue();
+        console.log(
+          savedSessionId
+            ? `[main] Resuming session ${savedSessionId}`
+            : '[main] Starting new session'
+        );
+
+        await session.start(text, savedSessionId ?? undefined);
+      } else {
+        await session.sendMessage(text);
+      }
+    } catch (err) {
+      console.error('[main] Error handling message:', (err as Error).message);
+      session.close();
+      clearSessionId();
+
+      try {
+        console.log('[main] Starting fresh session after error');
+        await session.start(text);
+      } catch (retryErr) {
+        console.error('[main] Failed to start fresh session:', (retryErr as Error).message);
+      }
     }
   });
-
-  async function processQueue() {
-    if (isRunning || messageQueue.length === 0) return;
-    isRunning = true;
-
-    const prompt = messageQueue.join('\n');
-    messageQueue = [];
-
-    console.log(`[main] Running Claude with prompt: ${prompt.slice(0, 100)}...`);
-
-    try {
-      const result = await runWithWatchdog(prompt, {
-        silenceThresholdMs: SILENCE_THRESHOLD_MS,
-        maxTurns: 10,
-        permissionMode: 'bypassPermissions',
-        mcpServer: telegramMcp,
-        allowedTools: ['mcp__telegram__*', 'Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'],
-        onSessionStart: (sid) => {
-          currentSessionId = sid;
-          console.log(`[main] Claude session: ${sid}`);
-        },
-        onSilence: (info: SilenceInfo) => {
-          console.log(`[main] Watchdog triggered: ${info.silenceDurationMs}ms silence after ${info.lastEventType}`);
-        },
-        onResult: (msg: any) => {
-          if (msg.subtype === 'success' && msg.result) {
-            console.log(`[main] Claude result: ${msg.result.slice(0, 200)}`);
-          }
-        },
-      });
-
-      console.log(`[main] Run complete: session=${result.sessionId}, resumes=${result.resumeCount}, silenceAbort=${result.abortedBySilence}`);
-    } catch (err) {
-      console.error('[main] SDK runner error:', (err as Error).message);
-    }
-
-    isRunning = false;
-
-    if (messageQueue.length > 0) {
-      processQueue();
-    }
-  }
 
   await bot.start({
     allowed_updates: ['message', 'message_reaction', 'callback_query'],

@@ -6,3 +6,4 @@ messages.db-*
 access.json
 messages.json
 .claude/
+.session-state.json
