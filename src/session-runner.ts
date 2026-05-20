@@ -7,6 +7,7 @@ import type { SilenceInfo } from './watchdog.js';
 export interface SessionRunnerOptions {
   silenceThresholdMs?: number;
   maxTurns?: number;
+  maxBudgetUsd?: number;
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions';
   model?: string;
   cwd?: string;
@@ -30,6 +31,10 @@ export class SessionRunner extends EventEmitter<SessionRunnerEvents> {
   private watchdog: StreamWatchdog;
   private controller: AbortController;
   private consuming = false;
+  private abortedBySilence = false;
+  private resumeCount = 0;
+  private readonly maxResumes = 3;
+  private lastPrompt: string = '';
   private readonly options: SessionRunnerOptions;
 
   constructor(options: SessionRunnerOptions = {}) {
@@ -42,6 +47,8 @@ export class SessionRunner extends EventEmitter<SessionRunnerEvents> {
         console.log(
           `[session] Silence: ${info.silenceDurationMs}ms since ${info.lastEventType} (session: ${info.sessionId})`
         );
+        this.abortedBySilence = true;
+        this.controller.abort();
         this.emit('silence', info);
       },
     });
@@ -60,6 +67,13 @@ export class SessionRunner extends EventEmitter<SessionRunnerEvents> {
       throw new Error('Session already running. Call close() first.');
     }
 
+    this.lastPrompt = prompt;
+    this.resumeCount = 0;
+    this.abortedBySilence = false;
+    this.startQuery(prompt, resumeSessionId);
+  }
+
+  private startQuery(prompt: string, resumeSessionId?: string): void {
     this.controller = new AbortController();
     const opts = this.buildQueryOptions(resumeSessionId);
 
@@ -102,9 +116,48 @@ export class SessionRunner extends EventEmitter<SessionRunnerEvents> {
     this.consuming = false;
   }
 
+  async closeGraceful(gracefulTimeoutMs: number = 8_000): Promise<void> {
+    this.watchdog.stop();
+
+    if (!this.q) {
+      this.consuming = false;
+      this.emit('closed');
+      return;
+    }
+
+    this.q.close();
+
+    const phase1 = await Promise.race([
+      new Promise<true>(resolve => this.once('closed', () => resolve(true))),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), gracefulTimeoutMs)),
+    ]);
+
+    if (phase1) {
+      this.q = null;
+      this.consuming = false;
+      return;
+    }
+
+    console.log('[session] Graceful close timed out, aborting...');
+    this.controller.abort();
+
+    const phase2 = await Promise.race([
+      new Promise<true>(resolve => this.once('closed', () => resolve(true))),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), 5_000)),
+    ]);
+
+    if (!phase2) {
+      console.warn('[session] Abort timed out, forcing cleanup');
+    }
+
+    this.q = null;
+    this.consuming = false;
+  }
+
   private buildQueryOptions(resumeSessionId?: string): Record<string, any> {
     const {
       maxTurns = 50,
+      maxBudgetUsd = parseFloat(process.env.MAX_BUDGET_USD || '5'),
       permissionMode = 'bypassPermissions',
       model,
       cwd,
@@ -116,6 +169,7 @@ export class SessionRunner extends EventEmitter<SessionRunnerEvents> {
     const opts: Record<string, any> = {
       abortController: this.controller,
       maxTurns,
+      maxBudgetUsd,
       permissionMode,
     };
 
@@ -171,6 +225,15 @@ export class SessionRunner extends EventEmitter<SessionRunnerEvents> {
       this.watchdog.stop();
       this.consuming = false;
       this.q = null;
+
+      if (this.abortedBySilence && this.resumeCount < this.maxResumes && this.sessionId) {
+        this.resumeCount++;
+        this.abortedBySilence = false;
+        console.log(`[session] Auto-resuming session ${this.sessionId} (attempt ${this.resumeCount}/${this.maxResumes})`);
+        this.startQuery(this.lastPrompt, this.sessionId);
+        return;
+      }
+
       this.emit('closed');
     }
   }
