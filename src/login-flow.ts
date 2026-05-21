@@ -19,6 +19,12 @@ const SCRIPT = process.env.CLAUDE_LOGIN_PIPE ?? '/opt/agent-os/claude/scripts/cl
 const OPERATOR_UNIT = process.env.LOGIN_OPERATOR_UNIT ?? 'agent-os-operator.service';
 const OPERATOR_TMUX = process.env.LOGIN_OPERATOR_TMUX ?? 'operator';
 const TMUX_TMPDIR = process.env.LOGIN_TMUX_TMPDIR ?? '/home/agent-os/.tmux';
+// LOGIN_OPERATOR_SOCKET: when operator's tmux session lives in a named socket
+// (systemd unit invokes `tmux -S /path/to/operator.sock ...`), `tmux has-session`
+// against the default socket will never find it and we'd spuriously restart the
+// unit on every /login. Empty string keeps default-socket behavior for callers
+// that don't need this. Production droplets set this in a drop-in.
+const OPERATOR_SOCKET = process.env.LOGIN_OPERATOR_SOCKET ?? '';
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface PendingLogin {
@@ -54,7 +60,10 @@ function clearPending(chatId: number): void {
 // fresh token at request time. If the session is dead, restart the unit.
 async function ensureOperatorAlive(): Promise<{ wasDead: boolean; restarted: boolean }> {
   try {
-    await execFileP('tmux', ['has-session', '-t', OPERATOR_TMUX], {
+    const args = OPERATOR_SOCKET
+      ? ['-S', OPERATOR_SOCKET, 'has-session', '-t', OPERATOR_TMUX]
+      : ['has-session', '-t', OPERATOR_TMUX];
+    await execFileP('tmux', args, {
       env: { ...process.env, TMUX_TMPDIR },
     });
     return { wasDead: false, restarted: false };
