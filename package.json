@@ -1,6 +1,6 @@
 {
   "name": "telegram-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Telegram bot + MCP server for Claude Code",
   "main": "dist/index.js",
   "scripts": {
