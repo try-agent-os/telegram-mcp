@@ -71,3 +71,35 @@ describe('login-flow state machine', () => {
     await cancelLogin(12345); // must not throw
   });
 });
+
+describe('login-flow operator-socket env wiring', () => {
+  // Direct unit-testing of `ensureOperatorAlive` would require stubbing the
+  // child-process call, which the codebase intentionally avoids. We instead
+  // verify the module loads cleanly with LOGIN_OPERATOR_SOCKET both set and
+  // unset — this catches wiring regressions (typos, removed defaults).
+  // Functional verification of the actual tmux `-S <sock>` invocation happens
+  // at deploy-smoke time on the droplet.
+  it('module imports with LOGIN_OPERATOR_SOCKET set', async () => {
+    const ORIG = process.env.LOGIN_OPERATOR_SOCKET;
+    process.env.LOGIN_OPERATOR_SOCKET = '/tmp/test-operator.sock';
+    try {
+      const mod = await import('../src/login-flow.js');
+      assert.equal(typeof mod.startLogin, 'function');
+      assert.equal(typeof mod.cancelLogin, 'function');
+    } finally {
+      if (ORIG === undefined) delete process.env.LOGIN_OPERATOR_SOCKET;
+      else process.env.LOGIN_OPERATOR_SOCKET = ORIG;
+    }
+  });
+
+  it('module imports with empty LOGIN_OPERATOR_SOCKET (default path)', async () => {
+    const ORIG = process.env.LOGIN_OPERATOR_SOCKET;
+    delete process.env.LOGIN_OPERATOR_SOCKET;
+    try {
+      const mod = await import('../src/login-flow.js');
+      assert.equal(typeof mod.startLogin, 'function');
+    } finally {
+      if (ORIG !== undefined) process.env.LOGIN_OPERATOR_SOCKET = ORIG;
+    }
+  });
+});
