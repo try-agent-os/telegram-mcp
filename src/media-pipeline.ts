@@ -1,12 +1,24 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync, readdirSync, unlinkSync } from 'fs';
+import { mkdirSync, readdirSync, unlinkSync, openAsBlob } from 'fs';
+import { stat } from 'fs/promises';
 import path from 'path';
-import { nodewhisper } from 'nodejs-whisper';
 
 const execFileP = promisify(execFile);
 
 const MEDIA_DIR = '/tmp/telegram-mcp';
+
+// OpenAI cloud transcription. Replaces local whisper.cpp (nodejs-whisper) since
+// 2026-06 — local whisper held ~1.2 GB resident and caused OOM cascades on
+// 8 GB hosts. gpt-4o-transcribe is the higher-quality 2025+ successor to
+// whisper-1; both share the /v1/audio/transcriptions endpoint and accept
+// response_format=text. Override the model via OPENAI_TRANSCRIBE_MODEL
+// (e.g. fall back to "whisper-1" if a tenant lacks gpt-4o-transcribe access).
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? '';
+const OPENAI_API_BASE = (process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1').replace(/\/$/, '');
+const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-4o-transcribe';
+// OpenAI hard cap on /audio/transcriptions uploads.
+const OPENAI_MAX_BYTES = 25 * 1024 * 1024;
 
 function ensureMediaDir(): void {
   try {
@@ -16,32 +28,53 @@ function ensureMediaDir(): void {
   }
 }
 
-function parseWhisperOutput(raw: string): string {
-  // whisper-cli prints lines like "[00:00:00.000 --> 00:00:05.600]   text"
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  const segments = lines
-    .map(l => l.replace(/^\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}\]\s*/, ''))
-    .filter(Boolean);
-  return segments.join(' ').trim();
-}
-
 async function transcribeAudio(filePath: string): Promise<string | null> {
+  if (!OPENAI_API_KEY) {
+    console.error('[transcribe] OPENAI_API_KEY not set — cannot transcribe');
+    return null;
+  }
+  const filename = path.basename(filePath);
+  let size = 0;
   try {
-    const raw = await nodewhisper(filePath, {
-      modelName: 'medium',
-      whisperOptions: {
-        outputInText: false,
-        outputInSrt: false,
-        outputInVtt: false,
-        outputInJson: false,
-        translateToEnglish: false,
-        wordTimestamps: false,
-      },
+    const stats = await stat(filePath);
+    size = stats.size;
+  } catch (err) {
+    console.error('[transcribe] stat failed:', (err as Error).message);
+    return null;
+  }
+  if (size > OPENAI_MAX_BYTES) {
+    console.error(`[transcribe] file too large: ${size}B > ${OPENAI_MAX_BYTES}B (${filename})`);
+    return null;
+  }
+  if (size === 0) {
+    console.error(`[transcribe] empty file (${filename})`);
+    return null;
+  }
+  try {
+    // openAsBlob (Node >=19.8) streams instead of buffering the whole audio.
+    const blob = await openAsBlob(filePath);
+    const form = new FormData();
+    form.append('file', blob, filename);
+    form.append('model', OPENAI_TRANSCRIBE_MODEL);
+    form.append('response_format', 'text');
+    // temperature=0 for deterministic output (gpt-4o-transcribe + whisper-1 both honor it).
+    form.append('temperature', '0');
+    const res = await fetch(`${OPENAI_API_BASE}/audio/transcriptions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: form,
     });
-    const text = parseWhisperOutput(raw);
+    if (!res.ok) {
+      const errBody = (await res.text()).slice(0, 200);
+      console.error(`[transcribe] OpenAI ${res.status} (model=${OPENAI_TRANSCRIBE_MODEL}, file=${filename}, ${size}B): ${errBody}`);
+      return null;
+    }
+    const text = (await res.text()).trim();
+    // Log length only, never content — voice messages are private.
+    console.log(`[transcribe] ok (model=${OPENAI_TRANSCRIBE_MODEL}, file=${filename}, ${size}B → ${text.length} chars)`);
     return text || null;
   } catch (err) {
-    console.error('[whisper] transcription error:', (err as Error).message);
+    console.error('[transcribe] error:', (err as Error).message);
     return null;
   }
 }
@@ -108,8 +141,8 @@ function cleanupTempAudio(prefix: string): void {
   }
 }
 
-const MAX_DURATION_SEC = 600; // 10 min cap — medium whisper ~ 1.3x realtime
-const MAX_FILESIZE = '50M';
+const MAX_DURATION_SEC = 600; // 10 min cap — keeps cloud cost predictable and stays under 25 MB.
+const MAX_FILESIZE = '24M'; // yt-dlp ceiling, leaves headroom under OpenAI 25 MB cap.
 
 function formatDuration(seconds: number): string {
   if (!seconds) return 'unknown';
@@ -120,7 +153,9 @@ function formatDuration(seconds: number): string {
 
 export async function processVideo(filePath: string, messageId: number): Promise<string | null> {
   ensureMediaDir();
-  const audioPath = path.join(MEDIA_DIR, `vid_${messageId}.wav`);
+  // Re-encode to mono 16 kHz MP3 (compact + universally accepted by OpenAI).
+  // WAV at 16 kHz would routinely blow past 25 MB for >10-min videos.
+  const audioPath = path.join(MEDIA_DIR, `vid_${messageId}.mp3`);
   try {
     await execFileP('ffmpeg', [
       '-y',
@@ -128,7 +163,8 @@ export async function processVideo(filePath: string, messageId: number): Promise
       '-vn',
       '-ar', '16000',
       '-ac', '1',
-      '-f', 'wav',
+      '-b:a', '32k',
+      '-f', 'mp3',
       audioPath,
     ], { timeout: 120000 });
 
