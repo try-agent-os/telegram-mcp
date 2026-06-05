@@ -18,20 +18,18 @@ const execFileP = promisify(execFile);
 //   3. whisper-cli    — local whisper.cpp spawned per call via nodejs-whisper.
 //                       Fully on-device, no resident process; slowest cold path.
 //
-// Selection (TRANSCRIPTION_BACKEND = openai | whisper-server | whisper-cli):
-//   • Explicit value wins (openai requires OPENAI_API_KEY; if missing we warn
-//     and fall through to the auto chain rather than silently failing).
-//   • Unset → backward-compatible auto-detect:
-//       WHISPER_SERVER_URL set → whisper-server, else → whisper-cli.
-//     (Cloud is never auto-selected without an explicit opt-in, to keep audio
-//      on-device by default.)
+// Selection is purely token-driven (no separate selector var):
+//   • OPENAI_API_KEY set (non-empty)  → openai cloud.
+//   • OPENAI_API_KEY absent           → local: WHISPER_SERVER_URL set ?
+//                                        whisper-server : whisper-cli.
+//   Presence of the OpenAI token = opt into cloud (speed); absence = stay
+//   on-device (privacy), preferring a resident whisper-server when configured.
 //
 // Env vars:
-//   TRANSCRIPTION_BACKEND   openai | whisper-server | whisper-cli (optional)
-//   OPENAI_API_KEY          required for the openai backend
+//   OPENAI_API_KEY          present → cloud backend; absent → local backend
 //   OPENAI_API_BASE         default https://api.openai.com/v1
 //   OPENAI_TRANSCRIBE_MODEL default gpt-4o-transcribe (e.g. "whisper-1" fallback)
-//   WHISPER_SERVER_URL      base URL of a running whisper-server (server backend)
+//   WHISPER_SERVER_URL      base URL of a running whisper-server (local server backend)
 //   WHISPER_MODEL           local model name for whisper-cli (default "medium")
 //   TELEGRAM_MCP_MEDIA_DIR  scratch dir for extracted audio (default /tmp/telegram-mcp)
 // ---------------------------------------------------------------------------
@@ -48,19 +46,10 @@ const OPENAI_MAX_BYTES = 25 * 1024 * 1024;
 
 type TranscriptionBackend = 'openai' | 'whisper-server' | 'whisper-cli';
 
+// Token-driven: OPENAI_API_KEY present → cloud; absent → local
+// (whisper-server if WHISPER_SERVER_URL set, else whisper-cli).
 function resolveBackend(): TranscriptionBackend {
-  const explicit = (process.env.TRANSCRIPTION_BACKEND ?? '').trim().toLowerCase();
-  if (explicit === 'openai') {
-    if (OPENAI_API_KEY) return 'openai';
-    console.error('[transcribe] TRANSCRIPTION_BACKEND=openai but OPENAI_API_KEY not set — falling back to local whisper');
-  } else if (explicit === 'whisper-server') {
-    return 'whisper-server';
-  } else if (explicit === 'whisper-cli') {
-    return 'whisper-cli';
-  } else if (explicit) {
-    console.error(`[transcribe] unknown TRANSCRIPTION_BACKEND="${explicit}" — falling back to auto-detect`);
-  }
-  // Auto-detect: never picks cloud implicitly (keeps audio on-device by default).
+  if (OPENAI_API_KEY) return 'openai';
   return WHISPER_SERVER_URL ? 'whisper-server' : 'whisper-cli';
 }
 
