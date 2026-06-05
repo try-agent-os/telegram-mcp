@@ -252,6 +252,14 @@ export function getToolDefinitions() {
         required: ['user_id'],
       },
     },
+    {
+      name: 'telegram_whoami',
+      description: 'Return identity of the bot this telegram-mcp instance is talking through (id, username, first_name). Useful when multiple bots are configured per host.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
   ];
 }
 
@@ -369,6 +377,18 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     case 'telegram_get_timezone': {
       const { user_id } = args as { user_id: number };
       return { user_id, timezone: getTimezone(user_id) };
+    }
+
+    case 'telegram_whoami': {
+      const me = await bot.api.getMe();
+      return {
+        id: me.id,
+        username: me.username ?? null,
+        first_name: me.first_name,
+        is_bot: me.is_bot,
+        can_join_groups: me.can_join_groups,
+        can_read_all_group_messages: me.can_read_all_group_messages,
+      };
     }
 
     default:
