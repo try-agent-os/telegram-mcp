@@ -13,6 +13,7 @@ import {
   type PolicyMessage,
 } from './group-policy.js';
 import { extractMediaUrl, processUrl, processVideo, transcribeVoice } from './media-pipeline.js';
+import { isLoginAdmin, isLoginPending, submitLogin } from './login-flow.js';
 import type { ChatType, IncomingMessageEvent, MediaType } from './types.js';
 
 export interface ReactionEvent {
@@ -25,7 +26,7 @@ export interface ReactionEvent {
   userId: number | null;
 }
 
-const MEDIA_DIR = '/tmp/telegram-mcp';
+const MEDIA_DIR = process.env.TELEGRAM_MCP_MEDIA_DIR ?? '/tmp/telegram-mcp';
 
 let messageCallback: ((event: IncomingMessageEvent) => void) | null = null;
 let reactionCallback: ((event: ReactionEvent) => void) | null = null;
@@ -132,6 +133,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
     { command: 'timezone', description: 'Set or view timezone (e.g. /timezone America/New_York)' },
     { command: 'status', description: 'Check bot and Claude connection status' },
     { command: 'id', description: 'Show your Telegram user ID' },
+    { command: 'login', description: 'Re-authenticate Claude OAuth (admin only)' },
+    { command: 'login_cancel', description: 'Cancel a pending /login flow' },
     { command: 'help', description: 'List available commands' },
   ]).catch(err => console.error('[bot] Failed to set commands:', err));
 
@@ -152,7 +155,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
     const displayName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || null;
     const isForward = !!msg.forward_origin;
     const forwardFrom = getForwardFrom(msg.forward_origin);
-    return { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom };
+    const isForum = !!(msg.chat as { is_forum?: boolean }).is_forum;
+    const messageThreadId = msg.message_thread_id ?? null;
+    return { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId };
   }
 
   // Adapter: turn a grammY/Bot-API Message into the framework-agnostic shape
@@ -258,6 +263,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
     chatId: number;
     chatType: ChatType;
     chatTitle: string | null;
+    messageThreadId: number | null;
+    isForum: boolean;
     // Per-message group-policy verdict. The batch as a whole notifies the
     // agent if ANY of its parts was addressed to the bot (mention / reply /
     // slash command). This handles the share+caption pattern where the
@@ -305,12 +312,36 @@ export function createBot(token: string, options?: BotOptions): Bot {
       isForward: last.isForward,
       forwardFrom: last.forwardFrom,
       caption: null,
+      messageThreadId: last.messageThreadId,
+      isForum: last.isForum,
     }, notify);
   }
 
   bot.on('message:text', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
+
+    // /login follow-up: if there's a pending OAuth flow for this chat and the
+    // user just sent free-form text (not another slash command), treat it as
+    // the verification code. Handled inline here, not as a command, because
+    // the code itself is opaque — we can't know what it'll look like. Must
+    // run BEFORE batching so a single code isn't combined with a stray
+    // follow-up text into one payload sent to the agent.
+    if (
+      chatType === 'private' &&
+      isLoginAdmin(userId) &&
+      isLoginPending(chatId) &&
+      !msg.text!.startsWith('/')
+    ) {
+      const code = msg.text!.trim();
+      const result = await submitLogin(chatId, code);
+      if (result.ok) {
+        await ctx.reply('✅ Залогинен. Токен обновлен, operator/dispatcher подхватят через симлинк.');
+      } else {
+        await ctx.reply(`❌ Login failed: ${result.error}\n\nПопробуй /login снова.`);
+      }
+      return; // do NOT dispatch the code to the agent
+    }
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -338,6 +369,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
       chatId,
       chatType,
       chatTitle,
+      messageThreadId,
+      isForum,
       notify,
     };
 
@@ -356,7 +389,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
   // Voice messages
   bot.on('message:voice', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -393,13 +426,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'voice', filePath, fileName: null,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Video notes (round videos)
   bot.on('message:video_note', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -428,13 +462,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'video_note', filePath, fileName: null,
       isForward, forwardFrom, caption: null,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Photos
   bot.on('message:photo', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -464,13 +499,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'photo', filePath, fileName: null,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Documents (PDF, files, etc.)
   bot.on('message:document', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -505,13 +541,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'document', filePath, fileName: originalName,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Videos
   bot.on('message:video', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -549,13 +586,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'video', filePath, fileName: video.file_name ?? null,
       isForward, forwardFrom, caption,
+      messageThreadId, isForum,
     }, notify);
   });
 
   // Stickers
   bot.on('message:sticker', async (ctx: Context) => {
     const msg = ctx.message!;
-    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom } = getBaseFields(msg);
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
@@ -575,6 +613,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'sticker', filePath: null, fileName: null,
       isForward, forwardFrom, caption: null,
+      messageThreadId, isForum,
     }, notify);
   });
 

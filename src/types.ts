@@ -37,6 +37,40 @@ export interface IncomingMessageEvent {
   isForward: boolean;
   forwardFrom: string | null;
   caption: string | null;
+  messageThreadId: number | null;
+  isForum: boolean;
+}
+
+export interface SessionKeyOptions {
+  shareSessionInGroup?: boolean;
+}
+
+/**
+ * Build a session key for per-chat Claude session isolation.
+ *
+ * Forum groups: threadId kept (topics are real sub-channels).
+ * Regular supergroups: threadId dropped (reply threads don't fragment session).
+ * Inspired by cc-connect buildSessionKey pattern (reimplemented from spec).
+ */
+export function buildSessionKey(
+  chatId: number,
+  chatType: ChatType,
+  messageThreadId: number | null,
+  isForum: boolean,
+  userId: number,
+  options: SessionKeyOptions = {}
+): string {
+  const { shareSessionInGroup = true } = options;
+
+  const isGroup = chatType === 'group' || chatType === 'supergroup';
+  const threadId = (isForum || !isGroup) ? messageThreadId : null;
+
+  if (shareSessionInGroup) {
+    if (threadId) return `telegram:${chatId}:${threadId}`;
+    return `telegram:${chatId}`;
+  }
+  if (threadId) return `telegram:${chatId}:${threadId}:${userId}`;
+  return `telegram:${chatId}:${userId}`;
 }
 
 export interface UserRecord {

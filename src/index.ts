@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
-import { initDb } from './db.js';
+import { initDb, seedAdmins } from './db.js';
 import { createBot, onIncomingMessage, onReaction } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import { getTimezone } from './access.js';
@@ -111,6 +111,26 @@ async function main() {
   // Init SQLite
   initDb();
   console.log('[telegram-mcp] Database initialized');
+
+  // Seed admins from env (multi-admin support).
+  // TELEGRAM_ADMIN_USER_IDS = comma-separated numeric IDs (preferred).
+  // TELEGRAM_USER_ID = legacy single-admin fallback.
+  // TELEGRAM_ADMIN_USERNAMES = parallel comma-separated usernames (display only).
+  const rawAdminIds = process.env.TELEGRAM_ADMIN_USER_IDS || process.env.TELEGRAM_USER_ID || '';
+  const adminIds = rawAdminIds
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  const adminUsernames = (process.env.TELEGRAM_ADMIN_USERNAMES || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (adminIds.length > 0) {
+    seedAdmins(adminIds, adminUsernames);
+    console.log(`[telegram-mcp] Seeded ${adminIds.length} admin(s) as allowed: ${adminIds.join(',')}`);
+  } else {
+    console.log('[telegram-mcp] No admin IDs in env (TELEGRAM_ADMIN_USER_IDS / TELEGRAM_USER_ID empty). Default policy: pending.');
+  }
 
   // Create grammY bot
   const startTime = Date.now();

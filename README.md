@@ -8,8 +8,8 @@ Built for [AgentOS](https://github.com/try-agent-os) but works as a standalone M
 
 - **Bidirectional**: bot receives messages from users, MCP exposes tools for the agent to send/reply/react
 - **Persistent history**: SQLite + FTS5 full-text search over every incoming/outgoing message
-- **Local voice transcription**: voice messages auto-transcribed via [`nodejs-whisper`](https://github.com/ChetanXpro/nodejs-whisper) (whisper.cpp, runs on-device, ~1.3x realtime on Apple Silicon)
-- **URL transcription**: YouTube/Instagram/TikTok/etc. links in text messages get auto-transcribed via `yt-dlp` + whisper
+- **Voice transcription (pluggable backend)**: voice messages auto-transcribed; pick the backend at runtime via `TRANSCRIPTION_BACKEND` — OpenAI cloud (`gpt-4o-transcribe`) for speed, a local resident `whisper-server` over HTTP, or local on-device `whisper-cli` ([`nodejs-whisper`](https://github.com/ChetanXpro/nodejs-whisper), whisper.cpp) for privacy
+- **URL transcription**: YouTube/Instagram/TikTok/etc. links in text messages get auto-transcribed via `yt-dlp` + the selected transcription backend
 - **Media support**: photos, voice, documents, stickers, forwarded posts
 - **Access control**: per-user allow/deny/pending policy stored in SQLite, managed via `/status` bot commands or MCP tools
 - **Per-user timezone**: timestamps localized in channel push payloads
@@ -35,7 +35,23 @@ npm run build
 npm start
 ```
 
-For voice transcription you also need `cmake`, `ffmpeg`, `yt-dlp` and the whisper `medium` model. See [SETUP.md](SETUP.md) for the full install (including the launchd plist for running as a user agent on macOS).
+For voice/URL transcription you always need `ffmpeg` and `yt-dlp`. The rest depends on the backend.
+
+### Transcription backend
+
+Selected via `TRANSCRIPTION_BACKEND` (`openai` | `whisper-server` | `whisper-cli`). When unset, it auto-detects: `WHISPER_SERVER_URL` set → `whisper-server`, otherwise `whisper-cli`. Cloud is never auto-selected — set `TRANSCRIPTION_BACKEND=openai` explicitly to send audio off-device.
+
+| Env var | Backend | Purpose |
+| --- | --- | --- |
+| `TRANSCRIPTION_BACKEND` | all | `openai` \| `whisper-server` \| `whisper-cli`; unset = auto-detect |
+| `OPENAI_API_KEY` | openai | required for the cloud backend |
+| `OPENAI_API_BASE` | openai | API base, default `https://api.openai.com/v1` |
+| `OPENAI_TRANSCRIBE_MODEL` | openai | default `gpt-4o-transcribe` (use `whisper-1` to fall back) |
+| `WHISPER_SERVER_URL` | whisper-server | base URL of a running [whisper-server](https://github.com/ggerganov/whisper.cpp) (model resident in RAM) |
+| `WHISPER_MODEL` | whisper-cli | local whisper.cpp model name, default `medium` |
+| `TELEGRAM_MCP_MEDIA_DIR` | all | scratch dir for extracted audio, default `/tmp/telegram-mcp` |
+
+For the local `whisper-cli` backend you also need `cmake` and the whisper `medium` model. See [SETUP.md](SETUP.md) for the full install (including the launchd plist for running as a user agent on macOS).
 
 ## Use as MCP server in Claude Code
 
