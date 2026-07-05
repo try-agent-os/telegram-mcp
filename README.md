@@ -1,5 +1,7 @@
 # telegram-mcp
 
+> **Note:** platform development is moving to the [try-agent-os/agent-os](https://github.com/try-agent-os/agent-os) monorepo, where this codebase lives on as `apps/receiver` (imported with full history). This repo remains the deployable standalone product for now; the protocol spec lives in [try-agent-os/protocol](https://github.com/try-agent-os/protocol).
+
 Telegram bot + MCP server in a single Node.js process. Lets a Claude Code agent talk to a Telegram bot — read incoming messages (text, voice, media, forwarded URLs), send/edit/react, and search the full message history via FTS5.
 
 Built for [AgentOS](https://github.com/try-agent-os) but works as a standalone MCP server for any Claude Code setup.
