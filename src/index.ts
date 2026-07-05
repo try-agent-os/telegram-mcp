@@ -6,8 +6,9 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
-import { initDb, seedAdmins, getUnansweredMessages, getUnansweredMessagesForUser, bumpReplayCount } from './db.js';
-import { createBot, onIncomingMessage, onReaction } from './bot.js';
+import os from 'os';
+import { initDb, seedAdmins, getUnansweredMessages, getUnansweredMessagesForUser, saveMessage, bumpReplayCount } from './db.js';
+import { createBot, onIncomingMessage, onReaction, onCallbackQuery } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import { getTimezone } from './access.js';
 import { mountConsole, publicGuard } from './console/routes.js';
@@ -15,6 +16,15 @@ import { SessionRegistry, parseBindUserId } from './user-routing.js';
 import type { Bot } from 'grammy';
 
 const PORT = parseInt(process.env.PORT ?? '3848', 10);
+
+// Safety net: a rejected Promise that nobody awaited (e.g. async MCP SDK call
+// firing after a session disconnect) is the historical crash mode for this
+// service (status=1/FAILURE). Log it instead of terminating — every relevant
+// caller already handles its own failures.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? `${reason.message}\n${reason.stack ?? ''}` : String(reason);
+  console.error(`[unhandledRejection] ${msg}`);
+});
 
 // Track active MCP server instances for channel push
 const activeSessions = new Map<string, Server>();
@@ -26,9 +36,9 @@ const activeSessions = new Map<string, Server>();
 const sessionRegistry = new SessionRegistry();
 
 // Push a channel notification only to the session(s) routeTargets() selects.
-// Centralizes the routing decision so all push paths (message/reaction/replay)
-// stay consistent. `isAdminOrSystem` forces delivery to the unbound
-// admin/operator sink regardless of user_id.
+// Centralizes the routing decision so all four push paths (message/reaction/
+// callback/replay) stay consistent. `isAdminOrSystem` forces delivery to the
+// unbound admin/operator sink regardless of user_id.
 function pushToTargets(
   params: { method: string; params: { content: string; meta: Record<string, string> } },
   opts: { userId?: string | number | null; isAdminOrSystem?: boolean; label: string },
@@ -252,6 +262,39 @@ async function main() {
     }, { userId: reactUserId, label: 'reaction' });
   });
 
+  // Handle inline-button taps — push to the routed Claude session(s). The push
+  // is deliberately UNAMBIGUOUS: content is `[button] <callback_data>` and the
+  // meta carries is_callback=true plus the message_id of the message that held
+  // the buttons, so the operator LLM treats it as a tap, not a typed message.
+  onCallbackQuery((event) => {
+    const { chatId, messageId, data, userId, username, displayName } = event;
+    const from = username ? `@${username}` : displayName ?? 'Unknown';
+    console.log(`[Telegram] ${from} tapped button "${data}" on msg ${messageId} in chat ${chatId}`);
+
+    const content = `[button] ${data}`;
+    const tz = getTimezone(userId);
+
+    pushToTargets({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id: String(chatId),
+          chat_type: 'private',
+          message_id: String(messageId),
+          // message_id == the message that carried the inline keyboard.
+          reply_to_message_id: String(messageId),
+          callback_data: data,
+          is_callback: 'true',
+          user: username ?? String(chatId),
+          user_id: String(userId),
+          ...getTimeMetadata(tz),
+          timezone: tz,
+        },
+      },
+    }, { userId, label: 'callback' });
+  });
+
   // Express app with SSE transport
   const app = express();
 
@@ -362,6 +405,88 @@ async function main() {
       sessions: transports.size,
       uptime: process.uptime(),
     });
+  });
+
+  // POST /emergency — out-of-band alerting endpoint.
+  //
+  // Used by host-side watchdog scripts and systemd OnFailure= drop-ins to
+  // surface critical events to the admin even when the operator session is
+  // dead (an in-band agent-delivery path can't deliver if the operator itself
+  // is what failed). Talks to grammY directly, so this process is the single
+  // source of truth for bot token + admin IDs.
+  //
+  // Body: { source, severity, message, log?, dedup_prefix? }
+  // Auth: if EMERGENCY_NOTIFY_TOKEN is set, requires X-Emergency-Token header
+  //       (otherwise open on localhost — express binds to 0.0.0.0, so this
+  //       SHOULD be combined with a token in any internet-reachable deploy).
+  app.post('/emergency', async (req, res) => {
+    const token = process.env.EMERGENCY_NOTIFY_TOKEN;
+    if (token && req.header('x-emergency-token') !== token) {
+      res.status(401).json({ ok: false, error: 'unauthorized' });
+      return;
+    }
+    const { source, severity, message, log, dedup_prefix } = (req.body ?? {}) as {
+      source?: string; severity?: string; message?: string; log?: string; dedup_prefix?: string;
+    };
+    if (!message || typeof message !== 'string') {
+      res.status(400).json({ ok: false, error: 'message required' });
+      return;
+    }
+    if (adminIds.length === 0) {
+      res.status(503).json({ ok: false, error: 'no admin recipients configured' });
+      return;
+    }
+    const sev = (severity ?? 'error').toLowerCase();
+    const icon = sev === 'error' ? '🔴' : sev === 'warn' ? '🟡' : sev === 'info' ? '🔵' : '⚪';
+    const host = process.env.HOSTNAME || os.hostname().split('.')[0];
+    const src = source ?? '?';
+    const prefix = dedup_prefix ? `${dedup_prefix} ` : '';
+    let full = `${icon} [${host}/${src}] ${sev}: ${prefix}${message}`;
+    if (log && typeof log === 'string') {
+      const clipped = log.split('\n').slice(-20).join('\n');
+      full += `\n\n\`\`\`\n${clipped}\n\`\`\``;
+    }
+    // Telegram hard limit is 4096 chars.
+    if (full.length > 3900) full = full.slice(0, 3900) + '…';
+
+    const sent: number[] = [];
+    const failures: { chat_id: number; error: string }[] = [];
+    for (const chatId of adminIds) {
+      try {
+        const result = await bot.api.sendMessage(chatId, full);
+        sent.push(chatId);
+        // Log to the message store so future alert storms can be bulk-deleted
+        // by pulling message_ids from a time range instead of brute-force
+        // scanning the whole id space.
+        try {
+          saveMessage({
+            telegram_message_id: result.message_id,
+            chat_id: chatId,
+            chat_type: 'private',
+            chat_title: null,
+            user_id: chatId,
+            username: null,
+            display_name: null,
+            text: full,
+            direction: 'out',
+            reply_to_message_id: null,
+            media_type: null,
+            file_path: null,
+            file_name: null,
+          });
+        } catch (dbErr) {
+          console.error(`[emergency] DB log failed for msg ${result.message_id}:`, (dbErr as Error).message);
+        }
+      } catch (err) {
+        failures.push({ chat_id: chatId, error: (err as Error).message });
+      }
+    }
+    console.log(`[emergency] ${src}/${sev} → sent=${sent.length} fail=${failures.length}: ${message.slice(0, 80)}`);
+    if (sent.length === 0) {
+      res.status(502).json({ ok: false, sent, failures });
+      return;
+    }
+    res.json({ ok: true, sent, failures });
   });
 
   const httpServer = app.listen(PORT, () => {
