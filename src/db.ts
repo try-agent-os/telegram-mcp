@@ -3,14 +3,22 @@ import fs from 'fs';
 import path from 'path';
 import type { TelegramMessage, ChatInfo, MediaType, UserRecord, AccessPolicy } from './types.js';
 
-const DB_PATH = path.join(process.cwd(), 'messages.db');
 const ACCESS_JSON_PATH = path.join(process.cwd(), 'access.json');
 const DEFAULT_TIMEZONE = 'Europe/Lisbon';
+
+// DB location: TELEGRAM_MCP_DB_PATH env override (e.g. a persistent state dir
+// on production hosts), default keeps the historical cwd-relative path.
+// Resolved at initDb() time (not module load) so tests/deploys can set the env
+// right before init.
+function resolveDbPath(): string {
+  const fromEnv = process.env.TELEGRAM_MCP_DB_PATH;
+  return fromEnv && fromEnv.trim().length > 0 ? fromEnv : path.join(process.cwd(), 'messages.db');
+}
 
 let db: Database.Database;
 
 export function initDb(): void {
-  db = new Database(DB_PATH);
+  db = new Database(resolveDbPath());
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
@@ -83,6 +91,13 @@ export function initDb(): void {
   }
   if (!colNames.includes('chat_title')) {
     db.exec(`ALTER TABLE messages ADD COLUMN chat_title TEXT`);
+  }
+
+  // Replay counter — bumped each time a row is surfaced as [MISSED] at session
+  // connect. Circuit breaker: getUnansweredMessages skips rows where
+  // replay_count >= REPLAY_MAX so a buggy ack path can't loop forever.
+  if (!colNames.includes('replay_count')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN replay_count INTEGER NOT NULL DEFAULT 0`).run();
   }
 
   // Insert default settings if missing
@@ -196,11 +211,95 @@ export function listChats(): ChatInfo[] {
   `).all() as ChatInfo[];
 }
 
+// Resolve a telegram_message_id back to the stored message. This is what lets
+// the agent turn a reply's reply_to_message_id into the original message
+// (e.g. an automated alert the admin replied to). Returns the most recent
+// match if the same telegram_message_id appears in multiple chats
+// (telegram_message_id is per-chat, so pass chatId when known to disambiguate).
+export function getMessageByTelegramId(telegramMessageId: number, chatId?: number): TelegramMessage | null {
+  let sql = 'SELECT * FROM messages WHERE telegram_message_id = ?';
+  const params: number[] = [telegramMessageId];
+  if (chatId) {
+    sql += ' AND chat_id = ?';
+    params.push(chatId);
+  }
+  sql += ' ORDER BY created_at DESC LIMIT 1';
+  const row = db.prepare(sql).get(...params) as TelegramMessage | undefined;
+  return row ?? null;
+}
+
 export function getLastIncomingMessageId(chatId: number): number | null {
   const row = db.prepare(
     "SELECT telegram_message_id FROM messages WHERE chat_id = ? AND direction = 'in' ORDER BY created_at DESC LIMIT 1"
   ).get(chatId) as { telegram_message_id: number } | undefined;
   return row?.telegram_message_id ?? null;
+}
+
+// Returns IN messages from the last sinceHours that have no OUT reply after them.
+// Only includes private chats (chat_id > 0) to avoid stale group notifications.
+// Used at session connect to replay messages missed during operator downtime.
+//
+// Excludes:
+//   - `[button] ...` rows (callback_query taps). The bot already auto-ack'd them
+//     via answerCallbackQuery + editMessageReplyMarkup, so they are NOT
+//     "unanswered" at the Telegram protocol level. Replaying them re-triggers
+//     side effects (duplicate callback handling downstream).
+//   - rows with replay_count >= REPLAY_MAX (circuit breaker against any future
+//     ack-tracking bug).
+export const REPLAY_MAX = 3;
+export function getUnansweredMessages(sinceHours = 24): TelegramMessage[] {
+  const hours = Math.max(1, Math.min(168, Number(sinceHours) || 24));
+  return db.prepare(`
+    SELECT m.*
+    FROM messages m
+    WHERE m.direction = 'in'
+      AND m.chat_id > 0
+      AND m.created_at > datetime('now', '-${hours} hours')
+      AND COALESCE(m.replay_count, 0) < ${REPLAY_MAX}
+      AND (m.text IS NULL OR m.text NOT LIKE '[button] %')
+      AND NOT EXISTS (
+        SELECT 1 FROM messages m2
+        WHERE m2.direction = 'out'
+          AND m2.chat_id = m.chat_id
+          AND m2.created_at > m.created_at
+      )
+    ORDER BY m.created_at ASC
+  `).all() as TelegramMessage[];
+}
+
+// Per-user variant of getUnansweredMessages. When per-user session routing is
+// active, a freshly-spawned per-user session must replay ONLY that user's
+// unanswered backlog — not everyone's — or each user's session would receive
+// the whole instance's missed traffic. Same circuit-breaker / [button]-exclusion
+// semantics as the global query, scoped by user_id. For private chats
+// chat_id == user_id, but we filter on user_id so a future group case can't
+// leak another user's row.
+export function getUnansweredMessagesForUser(userId: number, sinceHours = 24): TelegramMessage[] {
+  const hours = Math.max(1, Math.min(168, Number(sinceHours) || 24));
+  return db.prepare(`
+    SELECT m.*
+    FROM messages m
+    WHERE m.direction = 'in'
+      AND m.chat_id > 0
+      AND m.user_id = ?
+      AND m.created_at > datetime('now', '-${hours} hours')
+      AND COALESCE(m.replay_count, 0) < ${REPLAY_MAX}
+      AND (m.text IS NULL OR m.text NOT LIKE '[button] %')
+      AND NOT EXISTS (
+        SELECT 1 FROM messages m2
+        WHERE m2.direction = 'out'
+          AND m2.chat_id = m.chat_id
+          AND m2.created_at > m.created_at
+      )
+    ORDER BY m.created_at ASC
+  `).all(userId) as TelegramMessage[];
+}
+
+// Bump replay_count for a row. Called after each successful [MISSED] push so
+// the circuit breaker in getUnansweredMessages eventually stops re-surfacing
+// the same row if the operator never produces an OUT reply.
+export function bumpReplayCount(id: number): void {
+  db.prepare('UPDATE messages SET replay_count = COALESCE(replay_count, 0) + 1 WHERE id = ?').run(id);
 }
 
 // --- Users ---
