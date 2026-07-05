@@ -20,6 +20,7 @@
     "dotenv": "^16.5.0",
     "express": "^5.2.1",
     "grammy": "^1.35.0",
+    "http-proxy-middleware": "^3.0.7",
     "nodejs-whisper": "^0.3.0",
     "zod": "^4.4.3"
   },

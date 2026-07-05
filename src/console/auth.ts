@@ -2,8 +2,8 @@
 //
 // Algorithm (core.telegram.org/bots/webapps, HMAC path):
 //   secret_key       = HMAC_SHA256(key="WebAppData", msg=<bot_token>)
-//   data_check_string= all fields except `hash` and `signature`, sorted by key,
-//                      joined as `<key>=<value>` with '\n'
+//   data_check_string= all fields except `hash` (signature INCLUDED), sorted by
+//                      key, joined as `<key>=<value>` with '\n'
 //   valid  <=>  HMAC_SHA256(key=secret_key, msg=data_check_string) === hash
 //
 // We implement this with node:crypto rather than @telegram-apps/init-data-node
@@ -48,10 +48,14 @@ export function validateInitData(raw: string, now: number = Date.now()): InitDat
   const hash = params.get('hash');
   if (!hash) return { ok: false, reason: 'malformed' };
 
-  // data_check_string: every field except hash + signature, sorted by key.
+  // data_check_string: every field except `hash`, sorted by key. NB: the newer
+  // Mini App initData carries a `signature` field (Ed25519, for 3rd-party
+  // validation) — but Telegram's HMAC `hash` IS computed over signature too, so
+  // it must stay in the check string. Excluding it yields bad_hash. (Verified
+  // empirically against the live client via brute-force diag, 2026-05-23.)
   const pairs: string[] = [];
   for (const [key, value] of params.entries()) {
-    if (key === 'hash' || key === 'signature') continue;
+    if (key === 'hash') continue;
     pairs.push(`${key}=${value}`);
   }
   pairs.sort();
@@ -106,6 +110,17 @@ export function requireOwner(req: Request, res: Response, next: NextFunction): v
   const result = validateInitData(raw);
   if (!result.ok) {
     const code = result.reason === 'not_owner' ? 403 : 401;
+    // Log every rejection with safe metadata only (never the token or signature)
+    // — auth failures on a single-owner gate are worth a security trail.
+    try {
+      const p = new URLSearchParams(raw);
+      const keys = [...p.keys()].sort().join(',');
+      const authDate = Number(p.get('auth_date') ?? '0');
+      const ageSec = authDate > 0 ? Math.floor(Date.now() / 1000) - authDate : -1;
+      console.error(`[console][auth] reject reason=${result.reason} code=${code} userId=${result.userId ?? '-'} keys=[${keys}] auth_date_age_sec=${ageSec} owner=${OWNER_ID} hasToken=${BOT_TOKEN ? 'y' : 'n'}`);
+    } catch (e) {
+      console.error(`[console][auth] reject reason=${result.reason} (diag parse failed)`);
+    }
     res.status(code).json({ error: result.reason ?? 'invalid_init_data' });
     return;
   }
