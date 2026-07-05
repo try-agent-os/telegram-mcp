@@ -6,17 +6,46 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
-import { initDb, seedAdmins } from './db.js';
+import { initDb, seedAdmins, getUnansweredMessages, getUnansweredMessagesForUser, bumpReplayCount } from './db.js';
 import { createBot, onIncomingMessage, onReaction } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import { getTimezone } from './access.js';
 import { mountConsole, publicGuard } from './console/routes.js';
+import { SessionRegistry, parseBindUserId } from './user-routing.js';
 import type { Bot } from 'grammy';
 
 const PORT = parseInt(process.env.PORT ?? '3848', 10);
 
 // Track active MCP server instances for channel push
 const activeSessions = new Map<string, Server>();
+
+// Per-user session routing. A session can bind a user_id at /sse connect
+// (?user_id=). Until ANY session binds, this is inert and every push goes to
+// every session (legacy single-operator broadcast). Once bound, pushes are
+// routed by meta.user_id. See src/user-routing.ts.
+const sessionRegistry = new SessionRegistry();
+
+// Push a channel notification only to the session(s) routeTargets() selects.
+// Centralizes the routing decision so all push paths (message/reaction/replay)
+// stay consistent. `isAdminOrSystem` forces delivery to the unbound
+// admin/operator sink regardless of user_id.
+function pushToTargets(
+  params: { method: string; params: { content: string; meta: Record<string, string> } },
+  opts: { userId?: string | number | null; isAdminOrSystem?: boolean; label: string },
+): void {
+  const targets = sessionRegistry.routeTargets(
+    activeSessions.keys(),
+    opts.userId,
+    opts.isAdminOrSystem ?? false,
+  );
+  for (const sid of targets) {
+    const server = activeSessions.get(sid);
+    if (!server) continue;
+    server.notification(params).catch((err: Error) => {
+      console.error(`[channel] Failed to push ${opts.label} to session ${sid}: ${err.message}`);
+    });
+  }
+}
 
 function getLocalISO(tz: string): string {
   return getTimeMetadata(tz).local_date;
@@ -166,34 +195,33 @@ async function main() {
 
     const tz = getTimezone(userId);
 
-    // Push via claude/channel notification to all connected sessions
-    for (const [sid, server] of activeSessions) {
-      try {
-        server.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content,
-            meta: {
-              chat_id: String(chatId),
-              chat_type: chatType,
-              chat_title: chatTitle ?? '',
-              message_id: String(messageId),
-              reply_to_message_id: replyToMessageId ? String(replyToMessageId) : '',
-              quoted_text: quotedText ?? '',
-              user: username ?? String(chatId),
-              user_id: String(userId),
-              media_type: mediaType ?? '',
-              is_forward: isForward ? 'true' : 'false',
-              forward_from: forwardFrom ?? '',
-              ...getTimeMetadata(tz),
-              timezone: tz,
-            },
-          },
-        });
-      } catch (err) {
-        console.error(`[channel] Failed to push to session ${sid}:`, (err as Error).message);
-      }
-    }
+    // Push via claude/channel notification, routed by user_id (or broadcast
+    // while no session is bound — see pushToTargets / SessionRegistry).
+    // notification() is async — its throw ("Not connected") becomes a
+    // rejected Promise, handled inside pushToTargets via .catch().
+    // Group/supergroup messages have no single owning user; route them as
+    // admin/system so the operator/admin sink always sees them.
+    pushToTargets({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id: String(chatId),
+          chat_type: chatType,
+          chat_title: chatTitle ?? '',
+          message_id: String(messageId),
+          reply_to_message_id: replyToMessageId ? String(replyToMessageId) : '',
+          quoted_text: quotedText ?? '',
+          user: username ?? String(chatId),
+          user_id: String(userId),
+          media_type: mediaType ?? '',
+          is_forward: isForward ? 'true' : 'false',
+          forward_from: forwardFrom ?? '',
+          ...getTimeMetadata(tz),
+          timezone: tz,
+        },
+      },
+    }, { userId, isAdminOrSystem: chatType !== 'private', label: 'message' });
   });
 
   // Handle incoming reactions — push to all connected Claude sessions
@@ -203,35 +231,31 @@ async function main() {
     console.log(`[Telegram] ${from} ${action === 'added' ? 'added' : 'removed'} reaction ${emoji} on msg ${messageId} in chat ${chatId}`);
 
     const content = `[reaction: ${emoji}] on message_id=${messageId}`;
+    const reactUserId = event.userId ? String(event.userId) : String(chatId);
+    const reactTz = event.userId ? getTimezone(event.userId) : getTimezone(chatId);
 
-    for (const [sid, server] of activeSessions) {
-      try {
-        server.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content,
-            meta: {
-              chat_id: String(chatId),
-              message_id: String(messageId),
-              reaction: emoji,
-              reaction_action: action,
-              user: username ?? String(chatId),
-              user_id: event.userId ? String(event.userId) : String(chatId),
-              ...getTimeMetadata(event.userId ? getTimezone(event.userId) : getTimezone(chatId)),
-              timezone: event.userId ? getTimezone(event.userId) : getTimezone(chatId),
-            },
-          },
-        });
-      } catch (err) {
-        console.error(`[channel] Failed to push reaction to session ${sid}:`, (err as Error).message);
-      }
-    }
+    pushToTargets({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id: String(chatId),
+          message_id: String(messageId),
+          reaction: emoji,
+          reaction_action: action,
+          user: username ?? String(chatId),
+          user_id: reactUserId,
+          ...getTimeMetadata(reactTz),
+          timezone: reactTz,
+        },
+      },
+    }, { userId: reactUserId, label: 'reaction' });
   });
 
   // Express app with SSE transport
   const app = express();
 
-  // SECURITY: console.vasily.dev points at this same :3848. The public guard
+  // SECURITY: the Console public URL points at this same :3848. The public guard
   // runs FIRST so requests arriving via the cloudflared tunnel can only reach
   // /console* — the MCP transport (/sse, /messages), /emergency and /health
   // 404 for them. Local clients (Host=localhost) pass through untouched.
@@ -244,21 +268,78 @@ async function main() {
 
   const transports = new Map<string, SSEServerTransport>();
 
-  app.get('/sse', async (_req, res) => {
+  app.get('/sse', async (req, res) => {
     const transport = new SSEServerTransport('/messages', res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
-    console.log(`[connect] session=${sessionId}`);
+
+    // Per-user binding: a per-user dispatcher connects with /sse?user_id=<id>
+    // so this session receives ONLY that user's traffic. No param => unbound =>
+    // admin/operator sink (the single-operator case and the owner-oversight
+    // session). While zero sessions bind, routing is inert and every push
+    // broadcasts (legacy behavior).
+    const boundUserId = parseBindUserId(req.query.user_id);
+    sessionRegistry.connect(sessionId, boundUserId || null);
+    console.log(`[connect] session=${sessionId}${boundUserId ? ` user_id=${boundUserId}` : ' (unbound/admin)'}`);
 
     transport.onclose = () => {
       console.log(`[disconnect] session=${sessionId}`);
       transports.delete(sessionId);
       activeSessions.delete(sessionId);
+      sessionRegistry.disconnect(sessionId);
     };
 
     const server = createMcpServer(bot);
     activeSessions.set(sessionId, server);
     await server.connect(transport);
+
+    // Replay messages that arrived while no session was connected (operator restart / SSE drop).
+    // Delay 3s to let Claude Code finish its session handshake before receiving pushes.
+    //
+    // Per-user routing: a session bound to a user_id replays ONLY that user's
+    // unanswered backlog (getUnansweredMessagesForUser) — otherwise a freshly
+    // spawned per-user session would receive the whole instance's missed
+    // traffic. An unbound (admin) session replays the global backlog exactly
+    // as before. Each replayed push still goes through pushToTargets so the
+    // routing filter applies (a global-backlog row for a user who has their own
+    // bound session won't be mis-delivered to the admin session).
+    setTimeout(() => {
+      const missed = boundUserId
+        ? getUnansweredMessagesForUser(Number(boundUserId), 24)
+        : getUnansweredMessages(24);
+      if (missed.length === 0) return;
+      console.log(`[replay] session=${sessionId}${boundUserId ? ` user_id=${boundUserId}` : ''}: replaying ${missed.length} unanswered message(s)`);
+      for (const msg of missed) {
+        const tz = getTimezone(msg.user_id ?? msg.chat_id);
+        pushToTargets({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `[MISSED at ${msg.created_at} UTC] ${msg.text ?? ''}`,
+            meta: {
+              chat_id: String(msg.chat_id),
+              chat_type: msg.chat_type ?? 'private',
+              chat_title: msg.chat_title ?? '',
+              message_id: String(msg.telegram_message_id),
+              reply_to_message_id: msg.reply_to_message_id ? String(msg.reply_to_message_id) : '',
+              quoted_text: '',
+              user: msg.username ?? String(msg.chat_id),
+              user_id: msg.user_id ? String(msg.user_id) : String(msg.chat_id),
+              media_type: msg.media_type ?? '',
+              is_forward: 'false',
+              forward_from: '',
+              missed: 'true',
+              ...getTimeMetadata(tz),
+              timezone: tz,
+            },
+          },
+        }, { userId: msg.user_id ?? msg.chat_id, label: `replay msg ${msg.id}` });
+        // Bump replay_count so the circuit breaker in getUnansweredMessages
+        // eventually stops re-surfacing this row if no OUT reply ever lands.
+        try { bumpReplayCount(msg.id); } catch (e) {
+          console.error(`[replay] Failed to bump replay_count for msg ${msg.id}: ${(e as Error).message}`);
+        }
+      }
+    }, 3000);
   });
 
   app.post('/messages', async (req, res) => {
