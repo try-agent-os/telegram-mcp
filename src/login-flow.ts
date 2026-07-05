@@ -15,7 +15,9 @@ import { promisify } from 'util';
 
 const execFileP = promisify(execFile);
 
-const SCRIPT = process.env.CLAUDE_LOGIN_PIPE ?? '/opt/agent-os/claude/scripts/claude-login-pipe.sh';
+// CLAUDE_LOGIN_PIPE: host-side login-pipe script. The /login flow is disabled
+// when unset — deployments that want it must point this at their script.
+const SCRIPT = process.env.CLAUDE_LOGIN_PIPE ?? '';
 const OPERATOR_UNIT = process.env.LOGIN_OPERATOR_UNIT ?? 'agent-os-operator.service';
 const OPERATOR_TMUX = process.env.LOGIN_OPERATOR_TMUX ?? 'operator';
 const TMUX_TMPDIR = process.env.LOGIN_TMUX_TMPDIR ?? '/home/agent-os/.tmux';
@@ -90,6 +92,9 @@ export interface StartFailure {
 }
 
 export async function startLogin(chatId: number): Promise<StartResult | StartFailure> {
+  if (!SCRIPT) {
+    return { ok: false, error: '/login is not configured: set CLAUDE_LOGIN_PIPE to the host login-pipe script' };
+  }
   // Kill any prior session in case of stale state from a previous attempt.
   clearPending(chatId);
   try {
@@ -131,6 +136,9 @@ export interface SubmitFailure {
 }
 
 export async function submitLogin(chatId: number, code: string): Promise<SubmitResult | SubmitFailure> {
+  if (!SCRIPT) {
+    return { ok: false, error: '/login is not configured: set CLAUDE_LOGIN_PIPE to the host login-pipe script' };
+  }
   if (!pending.has(chatId)) {
     return { ok: false, error: 'no active login session — start with /login first' };
   }
@@ -152,6 +160,7 @@ export async function submitLogin(chatId: number, code: string): Promise<SubmitR
 
 export async function cancelLogin(chatId: number): Promise<void> {
   clearPending(chatId);
+  if (!SCRIPT) return;
   try {
     await execFileP(SCRIPT, ['cancel']);
   } catch {
