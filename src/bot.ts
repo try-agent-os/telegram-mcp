@@ -14,6 +14,7 @@ import {
 } from './group-policy.js';
 import { extractMediaUrl, processUrl, processVideo, transcribeVoice } from './media-pipeline.js';
 import { isLoginAdmin, isLoginPending, submitLogin } from './login-flow.js';
+import { consoleCommand, installConsoleMenuButton } from './console/menu-button.js';
 import type { ChatType, IncomingMessageEvent, MediaType } from './types.js';
 
 export interface ReactionEvent {
@@ -135,11 +136,16 @@ export function createBot(token: string, options?: BotOptions): Bot {
     { command: 'id', description: 'Show your Telegram user ID' },
     { command: 'login', description: 'Re-authenticate Claude OAuth (admin only)' },
     { command: 'login_cancel', description: 'Cancel a pending /login flow' },
+    { command: 'console', description: 'Open the AgentOS Console Mini App' },
     { command: 'help', description: 'List available commands' },
   ]).catch(err => console.error('[bot] Failed to set commands:', err));
 
   // Register commands before message handlers so they take priority
   bot.use(createCommands(options));
+
+  // Console Mini App: /console inline button + persistent chat Menu Button.
+  consoleCommand(bot);
+  installConsoleMenuButton(bot);
 
   function getBaseFields(msg: Message) {
     const userId = msg.from!.id;

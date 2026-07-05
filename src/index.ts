@@ -10,6 +10,7 @@ import { initDb, seedAdmins } from './db.js';
 import { createBot, onIncomingMessage, onReaction } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import { getTimezone } from './access.js';
+import { mountConsole, publicGuard } from './console/routes.js';
 import type { Bot } from 'grammy';
 
 const PORT = parseInt(process.env.PORT ?? '3848', 10);
@@ -229,7 +230,17 @@ async function main() {
 
   // Express app with SSE transport
   const app = express();
+
+  // SECURITY: console.vasily.dev points at this same :3848. The public guard
+  // runs FIRST so requests arriving via the cloudflared tunnel can only reach
+  // /console* — the MCP transport (/sse, /messages), /emergency and /health
+  // 404 for them. Local clients (Host=localhost) pass through untouched.
+  app.use(publicGuard);
+
   app.use(express.json());
+
+  // Console Mini App: static SPA at /console + owner-gated /console/api/*.
+  mountConsole(app);
 
   const transports = new Map<string, SSEServerTransport>();
 
