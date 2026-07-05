@@ -135,6 +135,29 @@ in a chat with @BotFather. With privacy mode left on, ingestion is limited to me
 
 **Access control in groups.** The per-user allow/pending/deny gate runs in private chats only. In a group the bot's mere presence (it was added by an admin) is treated as implicit access for every member; only an explicit pre-existing `denied` record blocks a particular user. This keeps the users table from filling up with `pending` rows for every group member who happens to send a message.
 
+## Console (Telegram Mini App)
+
+The bot ships an optional single-owner web Console — a Telegram Mini App served by the same Express process under `/console`. It shows live service cards (Komodo, Dagu routines, running Claude Code agent sessions via claude-peers) and supports drill-in into the embedded Dagu UI and a TG-login handoff into Komodo, all behind Telegram `initData` owner validation.
+
+**Backend** (`src/console/`) mounts automatically on the bot's HTTP port. Everything is env-gated — with no env set, the Console still serves locally at `http://localhost:PORT/console` and unconfigured cards say so:
+
+- `CONSOLE_OWNER_ID` — Telegram user id allowed into the Console (single-owner gate).
+- `CONSOLE_URL` — public HTTPS origin of the Console (cloudflared tunnel or your own domain). When set to a public https URL the bot registers a persistent "Console" chat menu button and the `/console` command replies with a web_app button. Unset/non-public → button skipped, backend still works locally. A quick-tunnel sidecar can update the URL at runtime via loopback-only `POST /console/internal/tunnel-url`.
+- `KOMODO_HOST_LOCAL`, `KOMODO_API_KEY`, `KOMODO_API_SECRET` — read-only Komodo status card.
+- `KOMODO_PUBLIC_URL` — public URL of your Komodo UI; also the origin used for the TG-login handoff (`KOMODO_GATEWAY_USER` / `KOMODO_GATEWAY_PASS` mint the session JWT server-side).
+- `DAGU_HOST_LOCAL`, `DAGU_BASE_PATH`, `DAGU_AUTH_BASIC_USERNAME` / `DAGU_AUTH_BASIC_PASSWORD`, `DAGU_PUBLIC_URL` — Dagu status card, native workflow/worker views, and the reverse-proxied drill-in under `/console/svc/dagu`.
+- `CLAUDE_PEERS_BASE_URL` (or `CLAUDE_PEERS_HEALTH_URL`) — claude-peers broker for the Agents section.
+
+**Front-end build pipeline.** The SPA source lives in `console-web-src/` (Vite + React + `@telegram-apps/sdk` + `@telegram-apps/telegram-ui`); the committed build output lives in `console-web/`, which `express.static` serves. `console-web/` is a generated artifact — do not edit it by hand. After changing anything in `console-web-src/`, rebuild and commit the regenerated bundle:
+
+```bash
+cd console-web-src
+npm ci
+npm run build   # vite build → ../console-web (base /console/, emptyOutDir wipes stale files)
+```
+
+No personal or deployment-specific values may be baked into the bundle: runtime configuration (e.g. the Komodo public origin) is delivered by the server via `/console/api/status`.
+
 ## Project layout
 
 ```
@@ -147,7 +170,10 @@ src/
   tools.ts          — MCP tool definitions
   media-pipeline.ts — voice/URL → whisper transcription
   commands/         — /help, /id, /status, /tz bot commands
+  console/          — Console Mini App backend (auth, status cards, Dagu proxy, Komodo gateway)
   types.ts          — shared types
+console-web-src/    — Console SPA source (Vite + React), builds into console-web/
+console-web/        — committed Console build artifact, served under /console
 tests/
   group-policy.test.ts — node:test unit tests for the group engagement policy
 deploy/
