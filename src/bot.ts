@@ -27,10 +27,26 @@ export interface ReactionEvent {
   userId: number | null;
 }
 
+// Inline-keyboard button tap (callback_query). The operator presents choices /
+// "go" gates as inline buttons; a tap arrives here, is pushed to the operator
+// session as a self-describing `[button] <data>` channel notification, and the
+// originating message is edited to lock the choice in.
+export interface CallbackEvent {
+  chatId: number;
+  // message_id of the message that HELD the buttons (so the operator can map
+  // the tap back to the prompt it offered).
+  messageId: number;
+  data: string;
+  userId: number;
+  username: string | null;
+  displayName: string | null;
+}
+
 const MEDIA_DIR = process.env.TELEGRAM_MCP_MEDIA_DIR ?? '/tmp/telegram-mcp';
 
 let messageCallback: ((event: IncomingMessageEvent) => void) | null = null;
 let reactionCallback: ((event: ReactionEvent) => void) | null = null;
+let callbackCallback: ((event: CallbackEvent) => void) | null = null;
 
 export function onIncomingMessage(cb: typeof messageCallback): void {
   messageCallback = cb;
@@ -38,6 +54,10 @@ export function onIncomingMessage(cb: typeof messageCallback): void {
 
 export function onReaction(cb: typeof reactionCallback): void {
   reactionCallback = cb;
+}
+
+export function onCallbackQuery(cb: typeof callbackCallback): void {
+  callbackCallback = cb;
 }
 
 function ensureMediaDir(): void {
