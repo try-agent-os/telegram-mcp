@@ -20,7 +20,7 @@ function buildInlineKeyboard(rows: ButtonRows | undefined): InlineKeyboard | und
   });
   return kb;
 }
-import { saveMessage, searchMessages, getRecent, listChats, getLastIncomingMessageId, listUsers } from './db.js';
+import { saveMessage, searchMessages, getMessageByTelegramId, getRecent, listChats, getLastIncomingMessageId, listUsers, getUnansweredMessages } from './db.js';
 import { approveUser, denyUser, getTimezone, setTimezone } from './access.js';
 
 // Markdown → Telegram HTML conversion.
@@ -32,6 +32,12 @@ function escapeHtml(s: string): string {
 
 function hasMarkdown(text: string): boolean {
   return /(\*\*[^*\n]+\*\*|```[\s\S]+?```|`[^`\n]+`|\[[^\]\n]+\]\([^\s)]+\)|^#+\s|^\s*[-*]\s)/m.test(text);
+}
+
+// Already-HTML text (raw Telegram-HTML tags). When present we must set parse_mode HTML
+// but NOT run markdownToTelegramHtml (it would escape the tags into literal text).
+function hasHtmlTags(text: string): boolean {
+  return /<\/?(b|i|u|s|code|pre|a|tg-spoiler|blockquote)(\s[^>]*)?>/i.test(text);
 }
 
 function markdownToTelegramHtml(text: string): string {
@@ -81,6 +87,9 @@ function markdownToTelegramHtml(text: string): string {
 function prepareOutgoing(text: string, explicitParseMode?: string): { text: string; parse_mode?: 'HTML' | 'MarkdownV2' } {
   if (explicitParseMode) {
     return { text, parse_mode: explicitParseMode as 'HTML' | 'MarkdownV2' };
+  }
+  if (hasHtmlTags(text)) {
+    return { text, parse_mode: 'HTML' };
   }
   if (hasMarkdown(text)) {
     return { text: markdownToTelegramHtml(text), parse_mode: 'HTML' };
@@ -199,6 +208,7 @@ export function getToolDefinitions() {
           chat_id: { type: 'number', description: 'Telegram chat ID' },
           message_id: { type: 'number', description: 'Message ID to edit' },
           text: { type: 'string', description: 'New text' },
+          parse_mode: { type: 'string', enum: ['HTML', 'MarkdownV2'], description: 'Parse mode (optional; HTML auto-applied when text has markdown/HTML tags)' },
         },
         required: ['chat_id', 'message_id', 'text'],
       },
@@ -218,17 +228,17 @@ export function getToolDefinitions() {
     },
     {
       name: 'telegram_search_messages',
-      description: 'Full-text search across message history',
+      description: 'Full-text search across message history. Pass message_id to look up a single message by its telegram_message_id (e.g. resolve a reply\'s reply_to_message_id back to the original alert) — query is ignored in that mode.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          query: { type: 'string', description: 'Search query' },
+          query: { type: 'string', description: 'Search query (required unless message_id is given)' },
+          message_id: { type: 'number', description: 'Look up the single message with this telegram_message_id (e.g. a reply_to_message_id). Bypasses full-text search.' },
           chat_id: { type: 'number', description: 'Filter by chat ID (optional)' },
           direction: { type: 'string', enum: ['in', 'out'], description: 'Filter by direction (optional)' },
           limit: { type: 'number', description: 'Max results (default 20)' },
           days: { type: 'number', description: 'Search last N days (optional)' },
         },
-        required: ['query'],
       },
     },
     {
@@ -312,6 +322,16 @@ export function getToolDefinitions() {
       inputSchema: {
         type: 'object' as const,
         properties: {},
+      },
+    },
+    {
+      name: 'telegram_get_unanswered',
+      description: 'Get incoming messages that have no bot reply after them (missed messages). Use at boot to detect messages missed during operator downtime.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          since_hours: { type: 'number', description: 'Look back N hours (default 24, max 168)' },
+        },
       },
     },
   ];
@@ -447,8 +467,9 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     }
 
     case 'telegram_edit_message': {
-      const { chat_id, message_id, text } = args as { chat_id: number; message_id: number; text: string };
-      await bot.api.editMessageText(chat_id, message_id, text);
+      const { chat_id, message_id, text, parse_mode } = args as { chat_id: number; message_id: number; text: string; parse_mode?: string };
+      const prepared = prepareOutgoing(text, parse_mode);
+      await bot.api.editMessageText(chat_id, message_id, prepared.text, prepared.parse_mode ? { parse_mode: prepared.parse_mode } : undefined);
       return { ok: true };
     }
 
@@ -459,9 +480,18 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     }
 
     case 'telegram_search_messages': {
-      const { query, chat_id, direction, limit, days } = args as {
-        query: string; chat_id?: number; direction?: 'in' | 'out'; limit?: number; days?: number;
+      const { query, message_id, chat_id, direction, limit, days } = args as {
+        query?: string; message_id?: number; chat_id?: number; direction?: 'in' | 'out'; limit?: number; days?: number;
       };
+      // message_id mode: resolve a reply_to_message_id back to the original
+      // message (automated alerts, etc.) without full-text search.
+      if (message_id != null) {
+        const msg = getMessageByTelegramId(message_id, chat_id);
+        return { messages: msg ? [msg] : [], total: msg ? 1 : 0 };
+      }
+      if (!query) {
+        return { messages: [], total: 0, error: 'query or message_id required' };
+      }
       return searchMessages(query, chat_id, direction, limit, days);
     }
 
@@ -511,6 +541,12 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         can_join_groups: me.can_join_groups,
         can_read_all_group_messages: me.can_read_all_group_messages,
       };
+    }
+
+    case 'telegram_get_unanswered': {
+      const { since_hours } = args as { since_hours?: number };
+      const messages = getUnansweredMessages(since_hours ?? 24);
+      return { count: messages.length, messages };
     }
 
     default:
