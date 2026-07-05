@@ -22,6 +22,17 @@ function buildInlineKeyboard(rows: ButtonRows | undefined): InlineKeyboard | und
 }
 import { saveMessage, searchMessages, getMessageByTelegramId, getRecent, listChats, getLastIncomingMessageId, listUsers, getUnansweredMessages } from './db.js';
 import { approveUser, denyUser, getTimezone, setTimezone } from './access.js';
+import { botExchangeTracker, parseCoordinationChats } from './group-routing.js';
+
+// Coordination groups whose outgoing messages we record into the bot↔bot reply
+// chain (so the anti-loop depth guard links across this bot's own sends — a bot
+// gets no update event for its own messages).
+const COORD_CHATS = parseCoordinationChats(process.env.TELEGRAM_ALWAYS_ENGAGE_CHAT_IDS);
+function recordOutgoing(chatId: number, messageId: number, replyToMessageId: number | null): void {
+  if (COORD_CHATS.has(chatId)) {
+    botExchangeTracker.observeOutgoing(chatId, messageId, replyToMessageId);
+  }
+}
 
 // Markdown → Telegram HTML conversion.
 // Telegram HTML subset: <b>, <i>, <u>, <s>, <code>, <pre>, <a>, <tg-spoiler>, <blockquote>.
@@ -365,6 +376,7 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         file_path: null,
         file_name: null,
       });
+      recordOutgoing(chat_id, sent.message_id, reply_to_message_id ?? null);
       return { message_id: sent.message_id, chat_id, date: new Date(sent.date * 1000).toISOString() };
     }
 
@@ -433,6 +445,7 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         file_path: null,
         file_name: null,
       });
+      recordOutgoing(chat_id, sentMessageId, reply_to_message_id ?? null);
       return { message_id: sentMessageId, chat_id, rich: !degraded, degraded, error: degradeError };
     }
 
@@ -463,6 +476,7 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         file_path: null,
         file_name: null,
       });
+      recordOutgoing(chat_id, sent.message_id, lastMsgId);
       return { message_id: sent.message_id };
     }
 
