@@ -6,6 +6,12 @@
 import { komoRead, komodoConfigured, type StacksSummary, type StackListItem, type ServerListItem } from './komodo.js';
 import { daguGet, daguConfigured, type DagListResponse, type DagListItem } from './dagu.js';
 
+// Optional public links for the Komodo/Dagu cards (the "open in UI" target shown
+// in the SPA). No personal domain is baked in — unset → the card has no external
+// link. Override via env if you expose Komodo/Dagu on your own public URL.
+const KOMODO_PUBLIC_URL = process.env.KOMODO_PUBLIC_URL || null;
+const DAGU_PUBLIC_URL = process.env.DAGU_PUBLIC_URL || null;
+
 export type CardStatus = 'ok' | 'running' | 'down' | 'error' | 'unknown' | 'unconfigured';
 
 export interface ServiceCard {
@@ -35,7 +41,7 @@ function mapStackState(state?: string): CardStatus {
   }
 }
 
-function mapDaguStatus(label?: string): CardStatus {
+export function mapDaguStatus(label?: string): CardStatus {
   switch ((label ?? '').toLowerCase()) {
     case 'succeeded':
     case 'finished': return 'ok';
@@ -51,7 +57,7 @@ function mapDaguStatus(label?: string): CardStatus {
 
 async function komodoCards(): Promise<ServiceCard[]> {
   if (!komodoConfigured()) {
-    return [{ id: 'komodo-core', label: 'Komodo Core', kind: 'komodo', status: 'unconfigured', detail: 'KOMODO_API_KEY not set', url: 'https://home.vasily.dev' }];
+    return [{ id: 'komodo-core', label: 'Komodo Core', kind: 'komodo', status: 'unconfigured', detail: 'KOMODO_API_KEY not set', url: KOMODO_PUBLIC_URL }];
   }
   const cards: ServiceCard[] = [];
   try {
@@ -66,7 +72,7 @@ async function komodoCards(): Promise<ServiceCard[]> {
       kind: 'komodo',
       status: 'ok',
       detail: `${summary.running}/${summary.total} stacks running`,
-      url: 'https://home.vasily.dev',
+      url: KOMODO_PUBLIC_URL,
     });
     for (const srv of servers) {
       cards.push({
@@ -89,14 +95,14 @@ async function komodoCards(): Promise<ServiceCard[]> {
       });
     }
   } catch (err) {
-    cards.push({ id: 'komodo-core', label: 'Komodo Core', kind: 'komodo', status: 'error', detail: (err as Error).message, url: 'https://home.vasily.dev' });
+    cards.push({ id: 'komodo-core', label: 'Komodo Core', kind: 'komodo', status: 'error', detail: (err as Error).message, url: KOMODO_PUBLIC_URL });
   }
   return cards;
 }
 
 async function daguCard(): Promise<ServiceCard> {
   if (!daguConfigured()) {
-    return { id: 'dagu', label: 'Dagu (routines)', kind: 'dagu', status: 'unconfigured', detail: 'DAGU_AUTH_BASIC_* not set', url: 'https://claude4.vasily.dev' };
+    return { id: 'dagu', label: 'Dagu (routines)', kind: 'dagu', status: 'unconfigured', detail: 'DAGU_AUTH_BASIC_* not set', url: DAGU_PUBLIC_URL };
   }
   try {
     const res = await daguGet<DagListResponse>('/dags?limit=200');
@@ -109,9 +115,9 @@ async function daguCard(): Promise<ServiceCard> {
     const detail = failing.length > 0
       ? `${failing.length} failing: ${failing.slice(0, 3).map((d) => d.dag?.name ?? d.fileName).join(', ')}`
       : `${items.length} routines, all green`;
-    return { id: 'dagu', label: 'Dagu (routines)', kind: 'dagu', status, detail, url: 'https://claude4.vasily.dev' };
+    return { id: 'dagu', label: 'Dagu (routines)', kind: 'dagu', status, detail, url: DAGU_PUBLIC_URL };
   } catch (err) {
-    return { id: 'dagu', label: 'Dagu (routines)', kind: 'dagu', status: 'error', detail: (err as Error).message, url: 'https://claude4.vasily.dev' };
+    return { id: 'dagu', label: 'Dagu (routines)', kind: 'dagu', status: 'error', detail: (err as Error).message, url: DAGU_PUBLIC_URL };
   }
 }
 
