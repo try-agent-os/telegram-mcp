@@ -88,6 +88,34 @@ function prepareOutgoing(text: string, explicitParseMode?: string): { text: stri
   return { text };
 }
 
+// --- Rich Messages (Bot API 10.1, sendRichMessage) ---------------------------
+// InputRichMessage takes extended HTML or Markdown content (exactly one). Telegram
+// parses it server-side into RichBlock* blocks (headings, tables, lists, details,
+// block quotes, dividers, …). New clients render natively; older clients receive
+// Telegram's own fallback representation. grammY's typed Api (1.35) predates 10.1,
+// so we call the raw Bot API HTTP endpoint. If the rich send fails entirely we
+// degrade to a plain HTML sendMessage so the operator never loses a report.
+function richApiBase(): string {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set');
+  return `https://api.telegram.org/bot${token}`;
+}
+
+// Strip rich/HTML tags down to readable plain text for the method-level fallback.
+function richToPlain(html: string): string {
+  return html
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\/\s*(p|div|tr|li|h[1-6]|details|summary|blockquote|table)\s*>/gi, '\n')
+    .replace(/<\s*li[^>]*>/gi, '• ')
+    .replace(/<\s*td[^>]*>/gi, '\t')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 const buttonsSchema = {
   type: 'array' as const,
   description: 'Inline keyboard buttons as 2D array (rows). Each button: {text, url?} (URL button) or {text, callback?} (callback button). Exactly one of url/callback per button.',
@@ -120,6 +148,32 @@ export function getToolDefinitions() {
           buttons: buttonsSchema,
         },
         required: ['chat_id', 'text'],
+      },
+    },
+    {
+      name: 'telegram_send_rich_message',
+      description:
+        'Send a NATIVE rich message (Bot API 10.1 sendRichMessage): headings, tables, lists, ' +
+        'collapsible <details>, block quotes, dividers, code blocks. Provide content as extended ' +
+        'HTML (preferred) or Markdown — exactly one. Supported HTML: <h1>-<h6>, <p>, <table>/<tr>/<td>, ' +
+        '<ul>/<ol>/<li>, <details>/<summary>, <blockquote>, <hr>, <b>/<i>/<u>/<s>/<code>/<pre>/<a>. ' +
+        'New Telegram clients render natively; older clients get Telegram\'s automatic fallback. ' +
+        'Use this for structured reports/tables instead of monospace <pre> fakes. If the rich send ' +
+        'fails entirely, the tool degrades to a plain HTML text message (never silently drops).',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          chat_id: { type: 'number', description: 'Telegram chat ID' },
+          html: { type: 'string', description: 'Rich content as extended HTML. Provide exactly one of html|markdown.' },
+          markdown: { type: 'string', description: 'Rich content as Markdown. Provide exactly one of html|markdown.' },
+          fallback_text: { type: 'string', description: 'Optional plain/HTML text used only if the rich send fails (method-level fallback). If omitted, derived from html/markdown.' },
+          reply_to_message_id: { type: 'number', description: 'Message ID to reply to (optional)' },
+          buttons: buttonsSchema,
+          is_rtl: { type: 'boolean', description: 'Render the rich message right-to-left (optional)' },
+          skip_entity_detection: { type: 'boolean', description: 'Skip automatic detection of URLs/mentions/hashtags etc. (optional)' },
+          disable_notification: { type: 'boolean', description: 'Send silently (optional)' },
+        },
+        required: ['chat_id'],
       },
     },
     {
@@ -252,6 +306,14 @@ export function getToolDefinitions() {
         required: ['user_id'],
       },
     },
+    {
+      name: 'telegram_whoami',
+      description: 'Return identity of the bot this telegram-mcp instance is talking through (id, username, first_name). Useful when multiple bots are configured per host.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
   ];
 }
 
@@ -284,6 +346,74 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         file_name: null,
       });
       return { message_id: sent.message_id, chat_id, date: new Date(sent.date * 1000).toISOString() };
+    }
+
+    case 'telegram_send_rich_message': {
+      const { chat_id, html, markdown, fallback_text, reply_to_message_id, buttons, is_rtl, skip_entity_detection, disable_notification } = args as {
+        chat_id: number; html?: string; markdown?: string; fallback_text?: string;
+        reply_to_message_id?: number; buttons?: ButtonRows; is_rtl?: boolean;
+        skip_entity_detection?: boolean; disable_notification?: boolean;
+      };
+      const hasHtml = typeof html === 'string' && html.length > 0;
+      const hasMd = typeof markdown === 'string' && markdown.length > 0;
+      if (hasHtml === hasMd) {
+        throw new Error('telegram_send_rich_message: provide exactly one of `html` or `markdown`');
+      }
+      const richMessage: Record<string, unknown> = hasHtml ? { html } : { markdown };
+      if (is_rtl) richMessage.is_rtl = true;
+      if (skip_entity_detection) richMessage.skip_entity_detection = true;
+      const richKb = buildInlineKeyboard(buttons);
+      const payload: Record<string, unknown> = { chat_id, rich_message: richMessage };
+      if (disable_notification) payload.disable_notification = true;
+      if (reply_to_message_id) payload.reply_parameters = { message_id: reply_to_message_id };
+      if (richKb) payload.reply_markup = { inline_keyboard: richKb.inline_keyboard };
+
+      const plainForDb = hasHtml ? richToPlain(html!) : (markdown as string);
+      let sentMessageId: number;
+      let degraded = false;
+      let degradeError: string | undefined;
+
+      const resp = await fetch(`${richApiBase()}/sendRichMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = (await resp.json()) as { ok: boolean; result?: { message_id: number }; description?: string };
+
+      if (data.ok && data.result) {
+        sentMessageId = data.result.message_id;
+      } else {
+        // Method-level graceful degradation: fall back to a plain HTML text message.
+        degraded = true;
+        degradeError = data.description;
+        const fallback = (typeof fallback_text === 'string' && fallback_text.length > 0)
+          ? fallback_text
+          : (hasHtml ? html! : (markdown as string));
+        const prepared = prepareOutgoing(fallback, hasHtml ? 'HTML' : undefined);
+        const sent = await bot.api.sendMessage(chat_id, prepared.text, {
+          reply_parameters: reply_to_message_id ? { message_id: reply_to_message_id } : undefined,
+          parse_mode: prepared.parse_mode,
+          reply_markup: richKb,
+        });
+        sentMessageId = sent.message_id;
+      }
+
+      saveMessage({
+        telegram_message_id: sentMessageId,
+        chat_id,
+        chat_type: null,
+        chat_title: null,
+        user_id: null,
+        username: null,
+        display_name: 'Bot',
+        text: plainForDb,
+        direction: 'out',
+        reply_to_message_id: reply_to_message_id ?? null,
+        media_type: null,
+        file_path: null,
+        file_name: null,
+      });
+      return { message_id: sentMessageId, chat_id, rich: !degraded, degraded, error: degradeError };
     }
 
     case 'telegram_reply': {
@@ -369,6 +499,18 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
     case 'telegram_get_timezone': {
       const { user_id } = args as { user_id: number };
       return { user_id, timezone: getTimezone(user_id) };
+    }
+
+    case 'telegram_whoami': {
+      const me = await bot.api.getMe();
+      return {
+        id: me.id,
+        username: me.username ?? null,
+        first_name: me.first_name,
+        is_bot: me.is_bot,
+        can_join_groups: me.can_join_groups,
+        can_read_all_group_messages: me.can_read_all_group_messages,
+      };
     }
 
     default:

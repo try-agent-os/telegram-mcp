@@ -109,8 +109,25 @@ export interface BotOptions {
   getUptime: () => number;
 }
 
+// Optional override: chat ids listed in `TELEGRAM_ALWAYS_ENGAGE_GROUPS` (comma-
+// separated) are notified on every message regardless of mention/reply/slash.
+// Channels are still excluded (broadcast posts, see shouldNotifyAgent). Parsed
+// once at bot construction; set is empty when the env var is absent or blank.
+function parseAlwaysEngageGroups(raw: string | undefined): ReadonlySet<number> {
+  if (!raw) return new Set();
+  const ids = raw
+    .split(',')
+    .map(s => Number(s.trim()))
+    .filter(n => Number.isFinite(n) && n !== 0);
+  return new Set(ids);
+}
+
 export function createBot(token: string, options?: BotOptions): Bot {
   const bot = new Bot(token);
+  const alwaysEngageGroups = parseAlwaysEngageGroups(process.env.TELEGRAM_ALWAYS_ENGAGE_GROUPS);
+  if (alwaysEngageGroups.size > 0) {
+    console.log(`[bot] TELEGRAM_ALWAYS_ENGAGE_GROUPS active for ${alwaysEngageGroups.size} chat(s):`, [...alwaysEngageGroups].join(','));
+  }
 
   bot.api.setMyCommands([
     { command: 'tz', description: 'Set or view timezone (e.g. /tz Europe/Moscow)' },
@@ -342,7 +359,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // back to "notify" to preserve the legacy private-DM behaviour.
     const botId = getBotIdentity(ctx);
     const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId)
+      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
       : chatType === 'private';
 
     const buffered: BufferedTextMsg = {
@@ -384,7 +401,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     const botId = getBotIdentity(ctx);
     const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId)
+      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
       : chatType === 'private';
 
     const voice = msg.voice!;
@@ -428,7 +445,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     const botId = getBotIdentity(ctx);
     const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId)
+      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
       : chatType === 'private';
 
     const vn = msg.video_note!;
@@ -464,7 +481,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     const botId = getBotIdentity(ctx);
     const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId)
+      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
       : chatType === 'private';
 
     const photos = msg.photo!;
@@ -501,7 +518,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     const botId = getBotIdentity(ctx);
     const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId)
+      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
       : chatType === 'private';
 
     const doc = msg.document!;
@@ -543,7 +560,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     const botId = getBotIdentity(ctx);
     const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId)
+      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
       : chatType === 'private';
 
     const video = msg.video!;
@@ -588,7 +605,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     const botId = getBotIdentity(ctx);
     const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId)
+      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
       : chatType === 'private';
 
     const sticker = msg.sticker!;

@@ -240,6 +240,45 @@ describe('shouldNotifyAgent', () => {
     );
   });
 
+  it('notifies in a group when chatId is in the alwaysEngage override set', () => {
+    const ENGAGED = -5129991999;
+    const overrides = new Set<number>([ENGAGED]);
+    // Unaddressed message in an "always engage" group → notify.
+    assert.equal(
+      shouldNotifyAgent(
+        'group',
+        msg({ text: 'обычное сообщение без mention' }),
+        BOT,
+        { chatId: ENGAGED, alwaysEngage: overrides },
+      ),
+      true,
+    );
+    // Same message in a DIFFERENT (non-overridden) group → still no notify.
+    assert.equal(
+      shouldNotifyAgent(
+        'group',
+        msg({ text: 'обычное сообщение без mention' }),
+        BOT,
+        { chatId: -1, alwaysEngage: overrides },
+      ),
+      false,
+    );
+  });
+
+  it('still does NOT notify in channels even if their chatId is in alwaysEngage', () => {
+    // Channels are broadcast surfaces — the override does not promote them.
+    const ENGAGED = -1001234567890;
+    assert.equal(
+      shouldNotifyAgent(
+        'channel',
+        msg({ text: 'anything' }),
+        BOT,
+        { chatId: ENGAGED, alwaysEngage: new Set([ENGAGED]) },
+      ),
+      false,
+    );
+  });
+
   it('matches the test-plan group "Novo Studio" scenarios', () => {
     // 1. Vasily sends `@novostudio_agent_bot привет` → notify
     const t1 = '@novostudio_agent_bot привет';
