@@ -99,7 +99,7 @@ describe('isMentionedInText', () => {
     assert.equal(
       isMentionedInText(
         msg({
-          text: 'Vasily привет',
+          text: 'Robert привет',
           entities: [{ type: 'text_mention', offset: 0, length: 6, user: { id: 999 } }],
         }),
         BOT,
@@ -241,7 +241,7 @@ describe('shouldNotifyAgent', () => {
   });
 
   it('notifies in a group when chatId is in the alwaysEngage override set', () => {
-    const ENGAGED = -5129991999;
+    const ENGAGED = -1000000001;
     const overrides = new Set<number>([ENGAGED]);
     // Unaddressed message in an "always engage" group → notify.
     assert.equal(
@@ -280,7 +280,7 @@ describe('shouldNotifyAgent', () => {
   });
 
   it('matches the test-plan group "Novo Studio" scenarios', () => {
-    // 1. Vasily sends `@novostudio_agent_bot привет` → notify
+    // 1. The owner sends `@novostudio_agent_bot привет` → notify
     const t1 = '@novostudio_agent_bot привет';
     assert.equal(
       shouldNotifyAgent('group', msg({ text: t1, entities: [mentionEntity(t1, '@novostudio_agent_bot')] }), BOT),
