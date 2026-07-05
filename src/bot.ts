@@ -6,14 +6,32 @@ import path from 'path';
 import { checkAccess, touchUser } from './access.js';
 import { createCommands } from './commands/index.js';
 import { getUser, saveMessage } from './db.js';
+import { maybeAutospawn } from './autospawn.js';
 import {
   shouldNotifyAgent,
+  isMentionedInText,
+  isReplyToBot,
   type BotIdentity,
   type PolicyEntity,
   type PolicyMessage,
 } from './group-policy.js';
+import {
+  decideGroupEngagement,
+  parseCoordinationChats,
+  isPrimaryHostEnv,
+  botExchangeTracker,
+} from './group-routing.js';
 import { extractMediaUrl, processUrl, processVideo, transcribeVoice } from './media-pipeline.js';
 import { isLoginAdmin, isLoginPending, submitLogin } from './login-flow.js';
+import { isClearCommand, isClearAdmin, handleClear } from './clear-flow.js';
+import {
+  parseModelCommand,
+  parseModelCallback,
+  isModelAdmin,
+  handleModelSwitch,
+  labelForAlias,
+  modelKeyboard,
+} from './model-flow.js';
 import { consoleCommand, installConsoleMenuButton } from './console/menu-button.js';
 import type { ChatType, IncomingMessageEvent, MediaType } from './types.js';
 
@@ -43,6 +61,22 @@ export interface CallbackEvent {
 }
 
 const MEDIA_DIR = process.env.TELEGRAM_MCP_MEDIA_DIR ?? '/tmp/telegram-mcp';
+
+// Multi-agent coordination groups. These are dedicated agent-coordination
+// chats where several agent bots co-exist with BotFather Group Privacy OFF,
+// so every bot sees every message. Instead of a blanket "always engage"
+// (which would make N bots each reply once → duplicates), messages here go
+// through decideGroupEngagement() so exactly one bot responds.
+// Comma-separated chat IDs in TELEGRAM_ALWAYS_ENGAGE_CHAT_IDS.
+const COORD_CHATS = parseCoordinationChats(process.env.TELEGRAM_ALWAYS_ENGAGE_CHAT_IDS);
+// TELEGRAM_GROUP_PRIMARY_HOST: this host owns the human-no-mention default
+// (primary=true, backup=false). Backup defers and only takes over via the
+// grace-window failover below if the primary did not respond.
+const IS_PRIMARY_HOST = isPrimaryHostEnv(process.env.TELEGRAM_GROUP_PRIMARY_HOST);
+// Backup-host failover grace window: after a human-no-mention message the backup
+// waits this long; if it observes NO message from the primary bot in the chat
+// meanwhile, it engages. 0 disables failover. Default 7s.
+const BACKUP_GRACE_MS = Number(process.env.TELEGRAM_BACKUP_GRACE_MS ?? 7000);
 
 let messageCallback: ((event: IncomingMessageEvent) => void) | null = null;
 let reactionCallback: ((event: ReactionEvent) => void) | null = null;
@@ -235,6 +269,13 @@ export function createBot(token: string, options?: BotOptions): Bot {
         await ctx.reply('Access request submitted. Please wait for approval.');
         return false;
       }
+      // Phase 2 ingress hook: ALLOWED private-chat user → lazily ensure their
+      // isolated per-user session exists (the Phase-1 routing filter then
+      // delivers only to it). Gated behind MULTIUSER_AUTOSPAWN (default OFF) so
+      // single-operator installs are unaffected — see src/autospawn.ts. Only
+      // allowed users reach here (denied/pending returned above), never groups
+      // (the non-private branch below). Fire-and-forget; never blocks ingress.
+      maybeAutospawn(userId);
       return true;
     }
     // Non-private: only block users with a pre-existing 'denied' record.
@@ -271,6 +312,99 @@ export function createBot(token: string, options?: BotOptions): Bot {
     if (notify && messageCallback) messageCallback(event);
   }
 
+  // ── Multi-agent coordination-group routing ──────────────────────────────
+  // Pending backup-failover timers per chat. Cleared when the primary bot is
+  // observed responding (any bot message in the chat cancels them).
+  const pendingBackup = new Map<number, Set<NodeJS.Timeout>>();
+
+  function cancelPendingBackup(chatId: number): void {
+    const set = pendingBackup.get(chatId);
+    if (!set) return;
+    for (const t of set) clearTimeout(t);
+    pendingBackup.delete(chatId);
+  }
+
+  function scheduleBackup(event: IncomingMessageEvent): void {
+    const chatId = event.chatId;
+    const timer = setTimeout(() => {
+      const set = pendingBackup.get(chatId);
+      if (set) set.delete(timer);
+      // Primary never responded within the grace window — take over.
+      if (messageCallback) messageCallback(event);
+    }, BACKUP_GRACE_MS);
+    let set = pendingBackup.get(chatId);
+    if (!set) { set = new Set(); pendingBackup.set(chatId, set); }
+    set.add(timer);
+  }
+
+  interface RouteVerdict { notify: boolean; deferBackup: boolean }
+
+  // Decide engagement for one incoming message. Private → always notify;
+  // non-coordination groups → legacy mention/reply/slash policy (with the
+  // TELEGRAM_ALWAYS_ENGAGE_GROUPS override honoured via shouldNotifyAgent);
+  // coordination groups → full multi-agent protocol (decideGroupEngagement)
+  // + bot↔bot depth tracking.
+  function routeMessage(ctx: Context, msg: Message, chatId: number, chatType: ChatType): RouteVerdict {
+    if (chatType === 'private') return { notify: true, deferBackup: false };
+
+    const botId = getBotIdentity(ctx);
+    const isCoord = (chatType === 'group' || chatType === 'supergroup') && COORD_CHATS.has(chatId);
+
+    if (!isCoord) {
+      const notify = botId
+        ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
+        : false;
+      return { notify, deferBackup: false };
+    }
+
+    const policy = toPolicyMessage(msg);
+    const isFromBot = !!msg.from?.is_bot;
+    const replyToMsgId = msg.reply_to_message?.message_id ?? null;
+    // Record this message in the bot↔bot reply chain (also for human messages,
+    // which reset depth to 0). Must run exactly once per observed message.
+    const depth = botExchangeTracker.observe(chatId, msg.message_id, replyToMsgId, isFromBot);
+    // A response from the other (primary) bot cancels any backup failover.
+    if (isFromBot) cancelPendingBackup(chatId);
+
+    const addressesThisBot = botId
+      ? isMentionedInText(policy, botId) || isReplyToBot(policy, botId)
+      : false;
+    const hasAnyMention = policy.entities.some(
+      (e) => e.type === 'mention' || e.type === 'text_mention',
+    );
+
+    const verdict = decideGroupEngagement({
+      isFromBot,
+      addressesThisBot,
+      hasAnyMention,
+      isPrimaryHost: IS_PRIMARY_HOST,
+      botExchangeDepth: depth,
+      // Live failover is handled by the grace-window timer (deferBackup), which
+      // observes the primary's actual response — more reliable than a static
+      // liveness flag, so we report the primary as online to the pure decision.
+      primaryHostOnline: true,
+    });
+
+    if (verdict.depthExceeded) {
+      void ctx.api
+        .sendMessage(chatId, '⏹️ bot-exchange depth exceeded — stopping to avoid a loop.')
+        .catch(() => { /* best-effort notice */ });
+    }
+
+    return { notify: verdict.engage, deferBackup: verdict.deferBackup };
+  }
+
+  // Dispatch honouring a coordination route: persist always; notify now if
+  // engaged; otherwise (backup defer) schedule a grace-window failover.
+  function dispatchRouted(event: IncomingMessageEvent, route: RouteVerdict): void {
+    if (route.notify) {
+      dispatchEvent(event, true);
+      return;
+    }
+    dispatchEvent(event, false);
+    if (route.deferBackup && BACKUP_GRACE_MS > 0) scheduleBackup(event);
+  }
+
   // Text messages with per-(chat,user) debounced batching.
   // Share+caption in Telegram lands as two messages <500ms apart; without batching
   // Claude sees them as independent prompts and replies twice.
@@ -296,6 +430,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // slash command). This handles the share+caption pattern where the
     // caption mentions the bot but the link itself does not.
     notify: boolean;
+    // Coordination-group backup-host defer: not engaged now, but eligible for
+    // the grace-window failover if the primary doesn't respond.
+    deferBackup: boolean;
   }
 
   interface TextBatch {
@@ -313,6 +450,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
     const combined = batch.messages.map(m => m.text).join('\n');
     const last = batch.messages[batch.messages.length - 1];
     const notify = batch.messages.some(m => m.notify);
+    const deferBackup = !notify && batch.messages.some(m => m.deferBackup);
 
     let text = combined;
     const url = extractMediaUrl(combined);
@@ -321,7 +459,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       if (transcribed) text = `${combined}\n\n${transcribed}`;
     }
 
-    dispatchEvent({
+    dispatchRouted({
       userId: last.userId,
       chatId: last.chatId,
       chatType: last.chatType,
@@ -340,7 +478,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       caption: null,
       messageThreadId: last.messageThreadId,
       isForum: last.isForum,
-    }, notify);
+    }, { notify, deferBackup });
   }
 
   bot.on('message:text', async (ctx: Context) => {
@@ -373,14 +511,71 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     if (chatType === 'private') touchUser(userId, username, displayName);
 
+    // /clear interception (owner-only, private chat): clear the operator's Claude
+    // context IN-PLACE by injecting a NATIVE `/clear` into its tmux session, rather
+    // than letting `/clear` reach the agent as a normal channel-push (the agent
+    // can't clear its own context from inside the conversation). No restart, MCP
+    // connections stay alive. We persist the IN (thread history) and an OUT ack so
+    // watchdog gap signals see a reply and do NOT trigger a restart.
+    if (chatType === 'private' && isClearCommand(msg.text) && isClearAdmin(userId)) {
+      saveMessage({
+        telegram_message_id: msg.message_id, chat_id: chatId, chat_type: chatType,
+        chat_title: chatTitle, user_id: null, username, display_name: displayName,
+        text: msg.text!, direction: 'in', reply_to_message_id: msg.reply_to_message?.message_id ?? null,
+        media_type: null, file_path: null, file_name: null,
+      });
+      const result = await handleClear();
+      const ackText = result.ok
+        ? '🧹 Контекст очищен (native /clear, сессия жива — MCP не рвался).'
+        : `⚠️ Не смог очистить контекст: ${result.error ?? 'unknown error'}`;
+      const sent = await ctx.reply(ackText);
+      saveMessage({
+        telegram_message_id: sent.message_id, chat_id: chatId, chat_type: chatType,
+        chat_title: chatTitle, user_id: null, username: null, display_name: null,
+        text: ackText, direction: 'out', reply_to_message_id: msg.message_id,
+        media_type: null, file_path: null, file_name: null,
+      });
+      return; // handled here — do NOT dispatch /clear to the agent
+    }
+
+    // /model interception (owner-only, private chat) — sibling of /clear above.
+    // Bare `/model` → inline model-picker buttons (taps handled in the
+    // callback_query handler below, never forwarded to the agent).
+    // `/model <alias>` → inject a NATIVE `/model <alias>` into the operator tmux
+    // session right away. In-place switch, no restart, MCP connections stay alive.
+    const modelCmd = chatType === 'private' && isModelAdmin(userId) ? parseModelCommand(msg.text) : null;
+    if (modelCmd) {
+      saveMessage({
+        telegram_message_id: msg.message_id, chat_id: chatId, chat_type: chatType,
+        chat_title: chatTitle, user_id: null, username, display_name: displayName,
+        text: msg.text!, direction: 'in', reply_to_message_id: msg.reply_to_message?.message_id ?? null,
+        media_type: null, file_path: null, file_name: null,
+      });
+      let ackText: string;
+      let sent;
+      if (modelCmd.kind === 'menu') {
+        ackText = 'Выбери модель для сессии оператора:';
+        sent = await ctx.reply(ackText, { reply_markup: modelKeyboard() });
+      } else {
+        const result = await handleModelSwitch(modelCmd.alias);
+        ackText = result.ok
+          ? `✅ Модель: ${labelForAlias(modelCmd.alias)} (native /model ${modelCmd.alias}, сессия жива)`
+          : `⚠️ Не смог переключить модель: ${result.error ?? 'unknown error'}`;
+        sent = await ctx.reply(ackText);
+      }
+      saveMessage({
+        telegram_message_id: sent.message_id, chat_id: chatId, chat_type: chatType,
+        chat_title: chatTitle, user_id: null, username: null, display_name: null,
+        text: ackText, direction: 'out', reply_to_message_id: msg.message_id,
+        media_type: null, file_path: null, file_name: null,
+      });
+      return; // handled here — do NOT dispatch /model to the agent
+    }
+
     // Decide whether this message should trigger the agent. Private chats
-    // always notify; groups only when explicitly addressed. Bot identity is
-    // available via ctx.me after bot.init() — if it's somehow missing, fall
-    // back to "notify" to preserve the legacy private-DM behaviour.
-    const botId = getBotIdentity(ctx);
-    const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
-      : chatType === 'private';
+    // always notify; groups only when explicitly addressed (or via the
+    // always-engage override / coordination protocol) — see routeMessage.
+    const route = routeMessage(ctx, msg, chatId, chatType);
 
     const buffered: BufferedTextMsg = {
       text: msg.text!,
@@ -397,7 +592,8 @@ export function createBot(token: string, options?: BotOptions): Bot {
       chatTitle,
       messageThreadId,
       isForum,
-      notify,
+      notify: route.notify,
+      deferBackup: route.deferBackup,
     };
 
     const key = `${chatId}:${userId}`;
@@ -419,10 +615,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
-    const botId = getBotIdentity(ctx);
-    const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
-      : chatType === 'private';
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
 
     const voice = msg.voice!;
     const caption = msg.caption ?? null;
@@ -463,10 +656,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
-    const botId = getBotIdentity(ctx);
-    const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
-      : chatType === 'private';
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
 
     const vn = msg.video_note!;
     let filePath: string | null = null;
@@ -499,10 +689,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
-    const botId = getBotIdentity(ctx);
-    const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
-      : chatType === 'private';
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
 
     const photos = msg.photo!;
     const largest = photos[photos.length - 1]; // highest resolution
@@ -536,10 +723,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
-    const botId = getBotIdentity(ctx);
-    const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
-      : chatType === 'private';
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
 
     const doc = msg.document!;
     const caption = msg.caption ?? null;
@@ -578,10 +762,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
-    const botId = getBotIdentity(ctx);
-    const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
-      : chatType === 'private';
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
 
     const video = msg.video!;
     const caption = msg.caption ?? null;
@@ -623,10 +804,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
 
     if (!await gateAccess(ctx, userId, chatType)) return;
 
-    const botId = getBotIdentity(ctx);
-    const notify = botId
-      ? shouldNotifyAgent(chatType, toPolicyMessage(msg), botId, { chatId, alwaysEngage: alwaysEngageGroups })
-      : chatType === 'private';
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
 
     const sticker = msg.sticker!;
     const emoji = sticker.emoji ?? '?';
@@ -688,6 +866,135 @@ export function createBot(token: string, options?: BotOptions): Bot {
       if (!newEmojiSet.has(emoji)) {
         reactionCallback({ chatId, messageId, emoji, action: 'removed', username, displayName, userId });
       }
+    }
+  });
+
+  // Inline-keyboard button taps (callback_query). The operator attaches inline
+  // callback buttons when it offers a choice or a "go" gate; the user taps
+  // instead of typing. We:
+  //   1. gate access with the SAME owner/allowlist check used for messages,
+  //   2. answer the callback immediately to clear the client spinner (+ toast),
+  //   3. edit the originating message to lock the choice in (strip the keyboard,
+  //      append the chosen label) so it can't be tapped twice,
+  //   4. push a self-describing `[button] <data>` notification to the operator.
+  bot.on('callback_query:data', async (ctx: Context) => {
+    const cq = ctx.callbackQuery!;
+    const from = cq.from;
+    const userId = from.id;
+    const msg = cq.message;
+    const chatId = msg?.chat.id ?? from.id;
+    const chatType = (msg?.chat.type ?? 'private') as ChatType;
+    const data = cq.data ?? '';
+
+    // Access gate — never let a non-owner/denied user drive a callback.
+    if (!await gateAccess(ctx, userId, chatType)) {
+      try { await ctx.answerCallbackQuery({ text: 'Access denied.', show_alert: false }); } catch { /* ignore */ }
+      return;
+    }
+
+    // model_switch:<alias> interception (owner-only) — a tap on the /model picker.
+    // Handled entirely here: inject the native `/model <alias>` into the operator
+    // tmux session and edit the picker message into an ack. NOT forwarded to the
+    // agent as a channel-push (the agent can't switch its own model from inside
+    // the conversation).
+    const modelAlias = parseModelCallback(data);
+    if (modelAlias !== null) {
+      if (!isModelAdmin(userId)) {
+        try { await ctx.answerCallbackQuery({ text: 'Access denied.', show_alert: false }); } catch { /* ignore */ }
+        return;
+      }
+      const label = labelForAlias(modelAlias);
+      const result = await handleModelSwitch(modelAlias);
+      const ackText = result.ok
+        ? `✅ Модель: ${label} (native /model ${modelAlias}, сессия жива)`
+        : `⚠️ Не смог переключить модель: ${result.error ?? 'unknown error'}`;
+      try {
+        await ctx.answerCallbackQuery({ text: result.ok ? `✓ ${label}` : '⚠️ Ошибка', show_alert: !result.ok });
+      } catch (err) {
+        console.error('[bot] answerCallbackQuery failed:', (err as Error).message);
+      }
+      // Lock the picker in: replace its text with the ack (also drops the keyboard).
+      try {
+        await ctx.editMessageText(ackText);
+      } catch {
+        try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { /* ignore */ }
+      }
+      saveMessage({
+        telegram_message_id: msg?.message_id ?? 0,
+        chat_id: chatId,
+        chat_type: chatType,
+        chat_title: null,
+        user_id: null,
+        username: from.username ?? null,
+        display_name: [from.first_name, from.last_name].filter(Boolean).join(' ') || null,
+        text: `[button] ${data} → ${ackText}`,
+        direction: 'in',
+        reply_to_message_id: msg?.message_id ?? null,
+        media_type: null,
+        file_path: null,
+        file_name: null,
+      });
+      return; // handled here — do NOT forward the tap to the agent
+    }
+
+    // Clear the client's loading spinner immediately (Telegram shows a spinner on
+    // the button until answered; un-answered callbacks spin for ~30s).
+    try {
+      await ctx.answerCallbackQuery({ text: `✓ ${data}`.slice(0, 200) });
+    } catch (err) {
+      console.error('[bot] answerCallbackQuery failed:', (err as Error).message);
+    }
+
+    const username = from.username ?? null;
+    const displayName = [from.first_name, from.last_name].filter(Boolean).join(' ') || null;
+    const messageId = msg?.message_id ?? 0;
+
+    // Lock the choice in: remove the inline keyboard and mark the picked option
+    // on the original message text. Robust to "message is not modified" and to
+    // messages we can't edit (too old / no text). Done best-effort.
+    if (msg && messageId) {
+      const baseText =
+        'text' in msg && typeof msg.text === 'string'
+          ? msg.text
+          : 'caption' in msg && typeof (msg as { caption?: string }).caption === 'string'
+            ? (msg as { caption?: string }).caption!
+            : '';
+      const chosenLine = `\n\n✅ Выбрано: ${data}`;
+      try {
+        if (baseText) {
+          await ctx.editMessageText(`${baseText}${chosenLine}`);
+        } else {
+          // No editable text body — just strip the keyboard so it can't re-fire.
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        }
+      } catch (err) {
+        const m = (err as Error).message ?? '';
+        if (!/message is not modified/i.test(m)) {
+          // Fallback: at least try to drop the keyboard.
+          try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { /* ignore */ }
+        }
+      }
+    }
+
+    // Persist as an inbound message for history/replay parity with typed msgs.
+    saveMessage({
+      telegram_message_id: messageId,
+      chat_id: chatId,
+      chat_type: chatType,
+      chat_title: chatType === 'private' ? null : (msg?.chat as { title?: string })?.title ?? null,
+      user_id: null,
+      username,
+      display_name: displayName,
+      text: `[button] ${data}`,
+      direction: 'in',
+      reply_to_message_id: messageId,
+      media_type: null,
+      file_path: null,
+      file_name: null,
+    });
+
+    if (callbackCallback) {
+      callbackCallback({ chatId, messageId, data, userId, username, displayName });
     }
   });
 
