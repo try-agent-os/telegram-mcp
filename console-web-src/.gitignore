@@ -1,0 +1,3 @@
+node_modules/
+# The build output lands OUTSIDE this dir (../console-web) and IS committed —
+# it's the served SPA. Run `npm install && npm run build` here after editing src.

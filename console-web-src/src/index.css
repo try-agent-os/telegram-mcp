@@ -1,0 +1,131 @@
+/* tgui native component styles (variables, typography, light/dark). */
+@import '@telegram-apps/telegram-ui/dist/styles.css';
+
+/* Safe-area handling — the whole reason for this migration.
+   @telegram-apps/sdk viewport.bindCssVars() publishes:
+     --tg-viewport-safe-area-inset-{top,bottom,left,right}
+     --tg-viewport-content-safe-area-inset-{top,bottom,left,right}
+   "safe area" = device notch/home-indicator; "content safe area" = Telegram's own
+   chrome (Close/⋯) shown in fullscreen. We pad the shell by the SUM of both at top
+   so the header clears device notch AND Telegram controls in fullscreen, and by the
+   device safe area at the sides/bottom. env() is the fallback when the SDK vars are
+   absent (non-Telegram client / pre-bind paint). */
+:root {
+  --safe-top: calc(
+    var(--tg-viewport-safe-area-inset-top, env(safe-area-inset-top, 0px)) +
+      var(--tg-viewport-content-safe-area-inset-top, 0px)
+  );
+  --safe-bottom: var(--tg-viewport-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --safe-left: var(--tg-viewport-safe-area-inset-left, env(safe-area-inset-left, 0px));
+  --safe-right: var(--tg-viewport-safe-area-inset-right, env(safe-area-inset-right, 0px));
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  /* Fallback chain: Telegram theme var → tgui var (guaranteed by AppRoot in BOTH
+     light & dark) → static literal as last resort. Putting the tgui var before
+     the literal means a failed --tg-theme bind degrades to the CORRECT scheme
+     (light or dark) instead of a dark-hardcoded literal. */
+  background: var(--tg-theme-bg-color, var(--tgui--bg_color, #17212b));
+  color: var(--tg-theme-text-color, var(--tgui--text_color, #f5f5f5));
+}
+
+.console-shell {
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  padding-bottom: calc(var(--safe-bottom) + 16px);
+}
+
+/* Sticky header that respects the top safe area in fullscreen. */
+.console-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: calc(var(--safe-top) + 14px) 20px 10px;
+  background: var(--tg-theme-bg-color, var(--tgui--bg_color, #17212b));
+}
+
+.console-header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--tgui--font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
+}
+
+/* Build marker — the operator verifies reloads by version, so surface it discreetly. */
+.build-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--tg-theme-hint-color, var(--tgui--hint_color, #8a949e));
+}
+
+.center-spin {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+/* Status traffic-light dot in the Cell `before` slot. */
+.status-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.status-dot--pulse {
+  animation: status-pulse 1.4s ease-in-out infinite;
+}
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Uppercase kind tag shown as the Cell hint. */
+.kind-badge {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  color: var(--tg-theme-hint-color, var(--tgui--hint_color, #8a949e));
+}
+
+.quick-emoji {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.drill-chevron {
+  font-size: 22px;
+  line-height: 1;
+  color: var(--tg-theme-hint-color, var(--tgui--hint_color, #8a949e));
+}
+
+/* tgui Cell rendered as <button> for tappable cards — strip native button look.
+   `color: inherit` is critical: a native <button> defaults to the UA system
+   color `ButtonText`, which on a dark page resolves to DARK text on Telegram
+   Desktop (Chromium/CEF) — making tappable Cell titles/subtitles nearly invisible
+   on dark theme (mobile webviews resolve it differently, hence desktop-only). We
+   re-bind it to the theme text color so button text matches non-button Cells. */
+button.tgui-cell,
+.console-shell button {
+  width: 100%;
+  text-align: inherit;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+}
