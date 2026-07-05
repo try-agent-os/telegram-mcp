@@ -101,7 +101,9 @@ export async function startLogin(chatId: number): Promise<StartResult | StartFai
   const operatorStatus = await ensureOperatorAlive();
 
   try {
-    const { stdout } = await execFileP(SCRIPT, ['start'], { timeout: 40_000 });
+    // 70s: the script may sleep up to LOGIN_GUARD_SEC (~15s) waiting out a recent
+    // operator restart before the up-to-30s OAuth-prompt wait.
+    const { stdout } = await execFileP(SCRIPT, ['start'], { timeout: 70_000 });
     const urlMatch = stdout.match(/^URL=(.+)$/m);
     if (!urlMatch) {
       return { ok: false, error: 'login script returned no URL' };
@@ -133,7 +135,9 @@ export async function submitLogin(chatId: number, code: string): Promise<SubmitR
     return { ok: false, error: 'no active login session — start with /login first' };
   }
   try {
-    const { stdout } = await execFileP(SCRIPT, ['submit', code], { timeout: 60_000 });
+    // 70s: the script retry-polls up to LOGIN_VERIFY_SEC (~40s) for credentials
+    // to rotate after the code is pasted, replacing a one-shot check.
+    const { stdout } = await execFileP(SCRIPT, ['submit', code], { timeout: 70_000 });
     clearPending(chatId);
     if (stdout.trim() === 'OK') {
       return { ok: true };
