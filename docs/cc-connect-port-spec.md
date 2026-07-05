@@ -1,7 +1,6 @@
 # cc-connect Pattern Port — Implementation Spec
 
-Source: [cc-connect deep-dive](https://github.com/k-vasily/claude/blob/main/memory/research/cc-connect-deep-dive-2026-05-20.md)
-ClickUp master task: https://app.clickup.com/t/86c9wxg0j
+Source: internal cc-connect deep-dive research (2026-05-20)
 Date: 2026-05-20
 Author: worker-steal-from-cc-connect
 
