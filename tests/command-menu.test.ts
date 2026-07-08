@@ -1,15 +1,14 @@
-// command-menu unit tests — pure command-list builder + env-driven flag/admin parsing.
+// command-menu unit tests — pure command-list builder + env-driven flags.
 //
-// Covers buildBotCommands (base commands always, owner extras gated by flags),
-// currentCommandFlags (env → flags), and parseAdminIds (allowlist parsing with
-// legacy fallback). The actual setMyCommands API calls (registerBotCommands) are
-// not unit-tested here (they hit the live Bot API).
+// Covers buildBotCommands (base commands always, feature extras gated by flags)
+// and currentCommandFlags (env → flags). The actual setMyCommands API call
+// (registerBotCommands) is not unit-tested here (it hits the live Bot API). The
+// menu lives at default scope, so /clear and /model are visible to everyone.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildBotCommands,
   currentCommandFlags,
-  parseAdminIds,
   BASE_COMMANDS,
 } from '../src/command-menu.ts';
 
@@ -57,27 +56,5 @@ test('currentCommandFlags: reflects OPERATOR_*_INJECT_SCRIPT env', () => {
     else process.env.OPERATOR_CLEAR_INJECT_SCRIPT = savedClear;
     if (savedModel === undefined) delete process.env.OPERATOR_MODEL_INJECT_SCRIPT;
     else process.env.OPERATOR_MODEL_INJECT_SCRIPT = savedModel;
-  }
-});
-
-test('parseAdminIds: comma list, legacy fallback, and empty', () => {
-  const savedAdmin = process.env.TELEGRAM_ADMIN_USER_IDS;
-  const savedUser = process.env.TELEGRAM_USER_ID;
-  try {
-    process.env.TELEGRAM_ADMIN_USER_IDS = '111, 222 ,333';
-    delete process.env.TELEGRAM_USER_ID;
-    assert.deepEqual(parseAdminIds(), [111, 222, 333]);
-
-    delete process.env.TELEGRAM_ADMIN_USER_IDS;
-    process.env.TELEGRAM_USER_ID = '444';
-    assert.deepEqual(parseAdminIds(), [444]);
-
-    delete process.env.TELEGRAM_USER_ID;
-    assert.deepEqual(parseAdminIds(), []);
-  } finally {
-    if (savedAdmin === undefined) delete process.env.TELEGRAM_ADMIN_USER_IDS;
-    else process.env.TELEGRAM_ADMIN_USER_IDS = savedAdmin;
-    if (savedUser === undefined) delete process.env.TELEGRAM_USER_ID;
-    else process.env.TELEGRAM_USER_ID = savedUser;
   }
 });
