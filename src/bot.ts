@@ -513,12 +513,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // connections stay alive. We persist the IN (thread history) and an OUT ack so
     // watchdog gap signals see a reply and do NOT trigger a restart.
     if (chatType === 'private' && isClearCommand(msg.text)) {
-      // Admin/owner: inject into the OPERATOR session (unchanged). Non-admin on a
-      // multi-user instance: request a /clear on THEIR OWN per-user session (the
-      // operator session is never reachable by a non-admin). Otherwise (non-admin,
-      // single-operator hub) fall through to legacy behavior.
+      // Unified semantics: /clear always clears the caller's OWN session.
+      //  - Multi-user instance (session control on): EVERY user, including the
+      //    owner, has their own bound session (<slug>-user-<uid>) → per-user clear.
+      //  - Single-operator install (hub): only the admin has a session, and it is
+      //    the operator session → operator inject. Non-admin → fall through.
+      const sessionControl = isSessionControlEnabled();
       const clearAdmin = isClearAdmin(userId);
-      if (clearAdmin || isSessionControlEnabled()) {
+      if (sessionControl || clearAdmin) {
         saveMessage({
           telegram_message_id: msg.message_id, chat_id: chatId, chat_type: chatType,
           chat_title: chatTitle, user_id: null, username, display_name: displayName,
@@ -526,16 +528,16 @@ export function createBot(token: string, options?: BotOptions): Bot {
           media_type: null, file_path: null, file_name: null,
         });
         let ackText: string;
-        if (clearAdmin) {
-          const result = await handleClear();
-          ackText = result.ok
-            ? '🧹 Контекст очищен (native /clear, сессия жива — MCP не рвался).'
-            : `⚠️ Не смог очистить контекст: ${result.error ?? 'unknown error'}`;
-        } else {
+        if (sessionControl) {
           const ok = requestClear(userId);
           ackText = ok
             ? '🧹 Твоя сессия очищается (native /clear).'
             : '⚠️ Не смог очистить сессию: per-user session control недоступен.';
+        } else {
+          const result = await handleClear();
+          ackText = result.ok
+            ? '🧹 Контекст очищен (native /clear, сессия жива — MCP не рвался).'
+            : `⚠️ Не смог очистить контекст: ${result.error ?? 'unknown error'}`;
         }
         const sent = await ctx.reply(ackText);
         saveMessage({
@@ -553,11 +555,13 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // callback_query handler below, never forwarded to the agent).
     // `/model <alias>` → inject a NATIVE `/model <alias>` into the operator tmux
     // session right away. In-place switch, no restart, MCP connections stay alive.
-    // Admin/owner drives the OPERATOR session; a non-admin on a multi-user
-    // instance drives THEIR OWN per-user session. Both use the same picker.
+    // Unified semantics (same as /clear): on a multi-user instance every user
+    // (incl. owner) drives THEIR OWN per-user session; on the hub only the admin
+    // drives the operator session. Both use the same picker.
+    const sessionControl = chatType === 'private' && isSessionControlEnabled();
     const modelAdmin = chatType === 'private' && isModelAdmin(userId);
-    const modelPerUser = chatType === 'private' && !modelAdmin && isSessionControlEnabled();
-    const modelCmd = modelAdmin || modelPerUser ? parseModelCommand(msg.text) : null;
+    const modelPerUser = sessionControl;
+    const modelCmd = modelPerUser || modelAdmin ? parseModelCommand(msg.text) : null;
     if (modelCmd) {
       saveMessage({
         telegram_message_id: msg.message_id, chat_id: chatId, chat_type: chatType,
@@ -919,11 +923,12 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // the conversation).
     const modelAlias = parseModelCallback(data);
     if (modelAlias !== null) {
-      // Admin/owner → operator session; non-admin on a multi-user instance →
-      // their own per-user session; neither → deny.
+      // Unified semantics: multi-user instance → the tapping user's OWN per-user
+      // session (any allowed user, incl. owner); hub → admin drives the operator
+      // session; hub non-admin → deny.
+      const modelPerUser = isSessionControlEnabled();
       const modelAdmin = isModelAdmin(userId);
-      const modelPerUser = !modelAdmin && isSessionControlEnabled();
-      if (!modelAdmin && !modelPerUser) {
+      if (!modelPerUser && !modelAdmin) {
         try { await ctx.answerCallbackQuery({ text: 'Access denied.', show_alert: false }); } catch { /* ignore */ }
         return;
       }
