@@ -24,6 +24,7 @@ import {
 import { extractMediaUrl, processUrl, processVideo, transcribeVoice } from './media-pipeline.js';
 import { isLoginAdmin, isLoginPending, submitLogin } from './login-flow.js';
 import { isClearCommand, isClearAdmin, handleClear } from './clear-flow.js';
+import { isSessionControlEnabled, requestClear, requestModel } from './session-control.js';
 import {
   parseModelCommand,
   parseModelCallback,
@@ -511,25 +512,40 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // can't clear its own context from inside the conversation). No restart, MCP
     // connections stay alive. We persist the IN (thread history) and an OUT ack so
     // watchdog gap signals see a reply and do NOT trigger a restart.
-    if (chatType === 'private' && isClearCommand(msg.text) && isClearAdmin(userId)) {
-      saveMessage({
-        telegram_message_id: msg.message_id, chat_id: chatId, chat_type: chatType,
-        chat_title: chatTitle, user_id: null, username, display_name: displayName,
-        text: msg.text!, direction: 'in', reply_to_message_id: msg.reply_to_message?.message_id ?? null,
-        media_type: null, file_path: null, file_name: null,
-      });
-      const result = await handleClear();
-      const ackText = result.ok
-        ? '🧹 Контекст очищен (native /clear, сессия жива — MCP не рвался).'
-        : `⚠️ Не смог очистить контекст: ${result.error ?? 'unknown error'}`;
-      const sent = await ctx.reply(ackText);
-      saveMessage({
-        telegram_message_id: sent.message_id, chat_id: chatId, chat_type: chatType,
-        chat_title: chatTitle, user_id: null, username: null, display_name: null,
-        text: ackText, direction: 'out', reply_to_message_id: msg.message_id,
-        media_type: null, file_path: null, file_name: null,
-      });
-      return; // handled here — do NOT dispatch /clear to the agent
+    if (chatType === 'private' && isClearCommand(msg.text)) {
+      // Admin/owner: inject into the OPERATOR session (unchanged). Non-admin on a
+      // multi-user instance: request a /clear on THEIR OWN per-user session (the
+      // operator session is never reachable by a non-admin). Otherwise (non-admin,
+      // single-operator hub) fall through to legacy behavior.
+      const clearAdmin = isClearAdmin(userId);
+      if (clearAdmin || isSessionControlEnabled()) {
+        saveMessage({
+          telegram_message_id: msg.message_id, chat_id: chatId, chat_type: chatType,
+          chat_title: chatTitle, user_id: null, username, display_name: displayName,
+          text: msg.text!, direction: 'in', reply_to_message_id: msg.reply_to_message?.message_id ?? null,
+          media_type: null, file_path: null, file_name: null,
+        });
+        let ackText: string;
+        if (clearAdmin) {
+          const result = await handleClear();
+          ackText = result.ok
+            ? '🧹 Контекст очищен (native /clear, сессия жива — MCP не рвался).'
+            : `⚠️ Не смог очистить контекст: ${result.error ?? 'unknown error'}`;
+        } else {
+          const ok = requestClear(userId);
+          ackText = ok
+            ? '🧹 Твоя сессия очищается (native /clear).'
+            : '⚠️ Не смог очистить сессию: per-user session control недоступен.';
+        }
+        const sent = await ctx.reply(ackText);
+        saveMessage({
+          telegram_message_id: sent.message_id, chat_id: chatId, chat_type: chatType,
+          chat_title: chatTitle, user_id: null, username: null, display_name: null,
+          text: ackText, direction: 'out', reply_to_message_id: msg.message_id,
+          media_type: null, file_path: null, file_name: null,
+        });
+        return; // handled here — do NOT dispatch /clear to the agent
+      }
     }
 
     // /model interception (owner-only, private chat) — sibling of /clear above.
@@ -537,7 +553,11 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // callback_query handler below, never forwarded to the agent).
     // `/model <alias>` → inject a NATIVE `/model <alias>` into the operator tmux
     // session right away. In-place switch, no restart, MCP connections stay alive.
-    const modelCmd = chatType === 'private' && isModelAdmin(userId) ? parseModelCommand(msg.text) : null;
+    // Admin/owner drives the OPERATOR session; a non-admin on a multi-user
+    // instance drives THEIR OWN per-user session. Both use the same picker.
+    const modelAdmin = chatType === 'private' && isModelAdmin(userId);
+    const modelPerUser = chatType === 'private' && !modelAdmin && isSessionControlEnabled();
+    const modelCmd = modelAdmin || modelPerUser ? parseModelCommand(msg.text) : null;
     if (modelCmd) {
       saveMessage({
         telegram_message_id: msg.message_id, chat_id: chatId, chat_type: chatType,
@@ -548,8 +568,14 @@ export function createBot(token: string, options?: BotOptions): Bot {
       let ackText: string;
       let sent;
       if (modelCmd.kind === 'menu') {
-        ackText = 'Выбери модель для сессии оператора:';
+        ackText = modelPerUser ? 'Выбери модель для своей сессии:' : 'Выбери модель для сессии оператора:';
         sent = await ctx.reply(ackText, { reply_markup: modelKeyboard() });
+      } else if (modelPerUser) {
+        const ok = requestModel(userId, modelCmd.alias);
+        ackText = ok
+          ? `✅ Модель твоей сессии: ${labelForAlias(modelCmd.alias)} (native /model ${modelCmd.alias})`
+          : '⚠️ Не смог переключить модель: per-user session control недоступен.';
+        sent = await ctx.reply(ackText);
       } else {
         const result = await handleModelSwitch(modelCmd.alias);
         ackText = result.ok
@@ -893,17 +919,31 @@ export function createBot(token: string, options?: BotOptions): Bot {
     // the conversation).
     const modelAlias = parseModelCallback(data);
     if (modelAlias !== null) {
-      if (!isModelAdmin(userId)) {
+      // Admin/owner → operator session; non-admin on a multi-user instance →
+      // their own per-user session; neither → deny.
+      const modelAdmin = isModelAdmin(userId);
+      const modelPerUser = !modelAdmin && isSessionControlEnabled();
+      if (!modelAdmin && !modelPerUser) {
         try { await ctx.answerCallbackQuery({ text: 'Access denied.', show_alert: false }); } catch { /* ignore */ }
         return;
       }
       const label = labelForAlias(modelAlias);
-      const result = await handleModelSwitch(modelAlias);
-      const ackText = result.ok
-        ? `✅ Модель: ${label} (native /model ${modelAlias}, сессия жива)`
-        : `⚠️ Не смог переключить модель: ${result.error ?? 'unknown error'}`;
+      let ackText: string;
+      let ok: boolean;
+      if (modelPerUser) {
+        ok = requestModel(userId, modelAlias);
+        ackText = ok
+          ? `✅ Модель твоей сессии: ${label} (native /model ${modelAlias})`
+          : '⚠️ Не смог переключить модель: per-user session control недоступен.';
+      } else {
+        const result = await handleModelSwitch(modelAlias);
+        ok = result.ok;
+        ackText = result.ok
+          ? `✅ Модель: ${label} (native /model ${modelAlias}, сессия жива)`
+          : `⚠️ Не смог переключить модель: ${result.error ?? 'unknown error'}`;
+      }
       try {
-        await ctx.answerCallbackQuery({ text: result.ok ? `✓ ${label}` : '⚠️ Ошибка', show_alert: !result.ok });
+        await ctx.answerCallbackQuery({ text: ok ? `✓ ${label}` : '⚠️ Ошибка', show_alert: !ok });
       } catch (err) {
         console.error('[bot] answerCallbackQuery failed:', (err as Error).message);
       }
