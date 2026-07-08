@@ -33,6 +33,7 @@ import {
   modelKeyboard,
 } from './model-flow.js';
 import { consoleCommand, installConsoleMenuButton } from './console/menu-button.js';
+import { registerBotCommands } from './command-menu.js';
 import type { ChatType, IncomingMessageEvent, MediaType } from './types.js';
 
 export interface ReactionEvent {
@@ -183,16 +184,9 @@ export function createBot(token: string, options?: BotOptions): Bot {
     console.log(`[bot] TELEGRAM_ALWAYS_ENGAGE_GROUPS active for ${alwaysEngageGroups.size} chat(s):`, [...alwaysEngageGroups].join(','));
   }
 
-  bot.api.setMyCommands([
-    { command: 'tz', description: 'Set or view timezone (e.g. /tz Europe/Moscow)' },
-    { command: 'timezone', description: 'Set or view timezone (e.g. /timezone America/New_York)' },
-    { command: 'status', description: 'Check bot and Claude connection status' },
-    { command: 'id', description: 'Show your Telegram user ID' },
-    { command: 'login', description: 'Re-authenticate Claude OAuth (admin only)' },
-    { command: 'login_cancel', description: 'Cancel a pending /login flow' },
-    { command: 'console', description: 'Open the AgentOS Console Mini App' },
-    { command: 'help', description: 'List available commands' },
-  ]).catch(err => console.error('[bot] Failed to set commands:', err));
+  // Register the "/" command menu (dynamic per enabled host features, owner-gated
+  // extras scoped to admin chats). Non-throwing — never blocks bot startup.
+  void registerBotCommands(bot);
 
   // Register commands before message handlers so they take priority
   bot.use(createCommands(options));
