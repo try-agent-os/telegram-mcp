@@ -1,4 +1,4 @@
-export type MediaType = 'voice' | 'video_note' | 'photo' | 'document' | 'video' | 'sticker' | 'url';
+export type MediaType = 'voice' | 'video_note' | 'photo' | 'document' | 'video' | 'sticker' | 'url' | 'location' | 'venue';
 
 export type ChatType = 'private' | 'group' | 'supergroup' | 'channel';
 
@@ -17,6 +17,13 @@ export interface TelegramMessage {
   media_type: MediaType | null;
   file_path: string | null;
   file_name: string | null;
+  // Geo columns — populated for media_type 'location' (pin) and 'venue'.
+  // venue_title/venue_address are venue-only; location pins carry lat/lon alone.
+  // Optional so non-geo saveMessage callers (text/photo/OUT rows) can omit them.
+  latitude?: number | null;
+  longitude?: number | null;
+  venue_title?: string | null;
+  venue_address?: string | null;
   created_at: string;
 }
 
@@ -34,6 +41,12 @@ export interface IncomingMessageEvent {
   mediaType: MediaType | null;
   filePath: string | null;
   fileName: string | null;
+  // Geo fields — set only for location/venue media. Optional so existing
+  // callers (text/photo/voice/etc.) need not spell them out.
+  latitude?: number | null;
+  longitude?: number | null;
+  venueTitle?: string | null;
+  venueAddress?: string | null;
   isForward: boolean;
   forwardFrom: string | null;
   caption: string | null;

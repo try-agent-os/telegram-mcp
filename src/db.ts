@@ -99,6 +99,20 @@ export function initDb(): void {
   if (!colNames.includes('replay_count')) {
     db.prepare(`ALTER TABLE messages ADD COLUMN replay_count INTEGER NOT NULL DEFAULT 0`).run();
   }
+  // Geo columns — location pins carry lat/lon; venue messages add title/address
+  // on top. Additive ALTER TABLE so pre-existing rows keep NULL (never broken).
+  if (!colNames.includes('latitude')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN latitude REAL`).run();
+  }
+  if (!colNames.includes('longitude')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN longitude REAL`).run();
+  }
+  if (!colNames.includes('venue_title')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN venue_title TEXT`).run();
+  }
+  if (!colNames.includes('venue_address')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN venue_address TEXT`).run();
+  }
 
   // Insert default settings if missing
   db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('default_policy', 'pending')`).run();
@@ -145,8 +159,8 @@ function migrateFromAccessJson(): void {
 
 export function saveMessage(msg: Omit<TelegramMessage, 'id' | 'created_at'>): TelegramMessage {
   const stmt = db.prepare(`
-    INSERT INTO messages (telegram_message_id, chat_id, chat_type, chat_title, user_id, username, display_name, text, direction, reply_to_message_id, media_type, file_path, file_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (telegram_message_id, chat_id, chat_type, chat_title, user_id, username, display_name, text, direction, reply_to_message_id, media_type, file_path, file_name, latitude, longitude, venue_title, venue_address)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = stmt.run(
     msg.telegram_message_id, msg.chat_id,
@@ -154,7 +168,9 @@ export function saveMessage(msg: Omit<TelegramMessage, 'id' | 'created_at'>): Te
     msg.user_id,
     msg.username, msg.display_name, msg.text,
     msg.direction, msg.reply_to_message_id,
-    msg.media_type ?? null, msg.file_path ?? null, msg.file_name ?? null
+    msg.media_type ?? null, msg.file_path ?? null, msg.file_name ?? null,
+    msg.latitude ?? null, msg.longitude ?? null,
+    msg.venue_title ?? null, msg.venue_address ?? null
   );
   return { ...msg, id: result.lastInsertRowid as number, created_at: new Date().toISOString() };
 }

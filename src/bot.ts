@@ -160,6 +160,20 @@ function buildText(mediaType: MediaType | null, filePath: string | null, caption
   return text || '[empty]';
 }
 
+// Channel-push / DB text for a bare location pin. The operator reads these
+// coordinates straight out of the message content (e.g. to query Google Maps /
+// Overpass for nearby places). Live locations are tagged so a moving fix is
+// distinguishable from a static drop. e.g. `[location: 38.6296,-9.1156]`.
+export function formatLocationText(lat: number, lon: number, isLive = false): string {
+  return `[location${isLive ? ' live' : ''}: ${lat},${lon}]`;
+}
+
+// Channel-push / DB text for a venue (named place with title + optional
+// address). e.g. `[venue: "Sunset Amora" — Av. da Liberdade 1 | 38.6296,-9.1156]`.
+export function formatVenueText(title: string, address: string | null, lat: number, lon: number): string {
+  return `[venue: "${title}"${address ? ` — ${address}` : ''} | ${lat},${lon}]`;
+}
+
 export interface BotOptions {
   getSessionCount: () => number;
   getUptime: () => number;
@@ -302,6 +316,10 @@ export function createBot(token: string, options?: BotOptions): Bot {
       media_type: event.mediaType,
       file_path: event.filePath,
       file_name: event.fileName,
+      latitude: event.latitude ?? null,
+      longitude: event.longitude ?? null,
+      venue_title: event.venueTitle ?? null,
+      venue_address: event.venueAddress ?? null,
     });
 
     if (notify && messageCallback) messageCallback(event);
@@ -840,6 +858,69 @@ export function createBot(token: string, options?: BotOptions): Bot {
       replyToMessageId: msg.reply_to_message?.message_id ?? null,
       quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
       mediaType: 'sticker', filePath: null, fileName: null,
+      isForward, forwardFrom, caption: null,
+      messageThreadId, isForum,
+    }, notify);
+  });
+
+  // Venues (a pin with a named place — title + address). Bot-API venue messages
+  // ALSO carry a `location` field, so this MUST be registered BEFORE the
+  // message:location handler below; otherwise a venue would be double-ingested
+  // as a bare location. grammY stops the middleware chain when this filter
+  // matches and the handler returns without next(), so location never runs.
+  bot.on('message:venue', async (ctx: Context) => {
+    const msg = ctx.message!;
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
+
+    if (!await gateAccess(ctx, userId, chatType)) return;
+
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
+
+    const venue = msg.venue!;
+    const lat = venue.location.latitude;
+    const lon = venue.location.longitude;
+    const title = venue.title;
+    const address = venue.address ?? null;
+    const text = formatVenueText(title, address, lat, lon);
+
+    dispatchEvent({
+      userId, chatId, chatType, chatTitle, text, username, displayName,
+      messageId: msg.message_id,
+      replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
+      mediaType: 'venue', filePath: null, fileName: null,
+      latitude: lat, longitude: lon, venueTitle: title, venueAddress: address,
+      isForward, forwardFrom, caption: null,
+      messageThreadId, isForum,
+    }, notify);
+  });
+
+  // Location pins (bare geo, no named place). Guard against venue messages,
+  // which also match message:location — they are handled above and never reach
+  // here, but the explicit guard keeps this correct regardless of registration
+  // order. Live locations (live_period set) are tagged so the operator knows the
+  // coordinate is a moving fix.
+  bot.on('message:location', async (ctx: Context) => {
+    const msg = ctx.message!;
+    if (msg.venue) return; // belongs to the venue handler
+    const { userId, chatId, chatType, chatTitle, username, displayName, isForward, forwardFrom, isForum, messageThreadId } = getBaseFields(msg);
+
+    if (!await gateAccess(ctx, userId, chatType)) return;
+
+    const notify = routeMessage(ctx, msg, chatId, chatType).notify;
+
+    const loc = msg.location!;
+    const lat = loc.latitude;
+    const lon = loc.longitude;
+    const text = formatLocationText(lat, lon, !!loc.live_period);
+
+    dispatchEvent({
+      userId, chatId, chatType, chatTitle, text, username, displayName,
+      messageId: msg.message_id,
+      replyToMessageId: msg.reply_to_message?.message_id ?? null,
+      quotedText: (msg as { quote?: { text?: string } }).quote?.text ?? null,
+      mediaType: 'location', filePath: null, fileName: null,
+      latitude: lat, longitude: lon, venueTitle: null, venueAddress: null,
       isForward, forwardFrom, caption: null,
       messageThreadId, isForum,
     }, notify);
