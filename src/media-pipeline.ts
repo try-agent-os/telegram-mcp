@@ -1,7 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { mkdirSync, readdirSync, unlinkSync, openAsBlob } from 'fs';
-import { stat } from 'fs/promises';
+import { stat, readFile } from 'fs/promises';
 import path from 'path';
 import { nodewhisper } from 'nodejs-whisper';
 
@@ -43,6 +43,52 @@ const OPENAI_API_BASE = (process.env.OPENAI_API_BASE ?? 'https://api.openai.com/
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-4o-transcribe';
 // OpenAI hard cap on /audio/transcriptions uploads.
 const OPENAI_MAX_BYTES = 25 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Frame vision analysis (raskadrovka)
+// ---------------------------------------------------------------------------
+// For forwarded reels/short videos we additionally extract a handful of key
+// frames and describe each one with a vision model, so the operator can see
+// *what* is shown on screen (UI, dashboards, on-screen text), not only the
+// transcribed words. Best-effort: any failure degrades gracefully to
+// transcription-only — the frame pass never throws up to the caller.
+//
+// Backend is token-driven, mirroring the transcription selector:
+//   • ANTHROPIC_API_KEY set → Anthropic Messages API (VISION_MODEL, default a
+//                             current Claude vision model).
+//   • else OPENAI_API_KEY set → OpenAI chat/completions vision (OPENAI_VISION_MODEL).
+//   • neither → frames disabled (returns null).
+//
+// Env vars:
+//   MEDIA_FRAMES_DISABLED   set to "1"/"true" → skip frame analysis entirely
+//   MEDIA_FRAME_COUNT       override auto frame count (default: clamp(dur/10, 3, 8))
+//   ANTHROPIC_API_KEY       present → anthropic vision backend
+//   ANTHROPIC_API_BASE      default https://api.anthropic.com
+//   VISION_MODEL            anthropic vision model (default claude-opus-4-8)
+//   OPENAI_VISION_MODEL     openai vision model (default gpt-4o)
+// ---------------------------------------------------------------------------
+
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? '';
+const ANTHROPIC_API_BASE = (process.env.ANTHROPIC_API_BASE ?? 'https://api.anthropic.com').replace(/\/$/, '');
+const VISION_MODEL = process.env.VISION_MODEL ?? 'claude-opus-4-8';
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL ?? 'gpt-4o';
+const FRAMES_DISABLED = /^(1|true|yes)$/i.test(process.env.MEDIA_FRAMES_DISABLED ?? '');
+const FRAME_COUNT_OVERRIDE = parseInt(process.env.MEDIA_FRAME_COUNT ?? '', 10);
+// Vision downloads a full-resolution video; cap it well below yt-dlp's audio ceiling.
+const MAX_VIDEO_FILESIZE = process.env.MEDIA_MAX_VIDEO_FILESIZE ?? '60M';
+// Frame description prompt — Russian, since the operator/Vasily read Russian.
+const FRAME_PROMPT =
+  'Опиши кратко, одним-двумя предложениями (максимум 200 символов), что показано на этом кадре из видео: ' +
+  'текст на экране, UI/дашборд, объекты, действие. Без вступлений и кавычек — только описание.';
+
+type VisionBackend = 'anthropic' | 'openai' | null;
+
+function resolveVisionBackend(): VisionBackend {
+  if (FRAMES_DISABLED) return null;
+  if (ANTHROPIC_API_KEY) return 'anthropic';
+  if (OPENAI_API_KEY) return 'openai';
+  return null;
+}
 
 type TranscriptionBackend = 'openai' | 'whisper-server' | 'whisper-cli';
 
@@ -244,13 +290,183 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${m}m${s.toString().padStart(2, '0')}s` : `${s}s`;
 }
 
+function formatTimestamp(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+}
+
+// ffprobe a media file's duration in seconds (0 if unknown).
+async function probeDuration(filePath: string): Promise<number> {
+  try {
+    const { stdout } = await execFileP('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ], { timeout: 20000 });
+    return Math.floor(parseFloat(stdout.trim()) || 0);
+  } catch {
+    return 0;
+  }
+}
+
+// How many frames to grab: ~1 per 10s, clamped to the [3, 8] band the task asks for.
+function frameCountFor(durationSec: number): number {
+  if (Number.isFinite(FRAME_COUNT_OVERRIDE) && FRAME_COUNT_OVERRIDE > 0) {
+    return Math.min(8, Math.max(1, FRAME_COUNT_OVERRIDE));
+  }
+  if (!durationSec) return 4;
+  return Math.min(8, Math.max(3, Math.round(durationSec / 10)));
+}
+
+// Extract N evenly-spaced frames (downscaled to <=768px wide JPEGs). Fast seek
+// (-ss before -i) keeps each grab cheap. Returns [{ts, path}] for the frames
+// that were actually written.
+async function extractFrames(
+  videoPath: string,
+  prefix: string,
+  durationSec: number,
+): Promise<Array<{ ts: number; path: string }>> {
+  const count = frameCountFor(durationSec);
+  // When duration is unknown, sample the first ~30s uniformly as a best effort.
+  const span = durationSec > 0 ? durationSec : 30;
+  const frames: Array<{ ts: number; path: string }> = [];
+  const jobs: Array<Promise<void>> = [];
+  for (let i = 0; i < count; i++) {
+    const ts = (span * (i + 0.5)) / count;
+    const outPath = path.join(MEDIA_DIR, `${prefix}_frame_${i}.jpg`);
+    jobs.push(
+      execFileP('ffmpeg', [
+        '-y',
+        '-ss', ts.toFixed(2),
+        '-i', videoPath,
+        '-frames:v', '1',
+        '-vf', "scale='min(768,iw)':-2",
+        '-q:v', '3',
+        outPath,
+      ], { timeout: 30000 })
+        .then(async () => {
+          try {
+            const st = await stat(outPath);
+            if (st.size > 0) frames.push({ ts, path: outPath });
+          } catch { /* frame not produced */ }
+        })
+        .catch(() => { /* seek past EOF or decode error — skip this frame */ }),
+    );
+  }
+  await Promise.all(jobs);
+  frames.sort((a, b) => a.ts - b.ts);
+  return frames;
+}
+
+// --- Vision backend: OpenAI chat/completions (gpt-4o) ----------------------
+async function describeFrameViaOpenAI(b64: string): Promise<string | null> {
+  const res = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENAI_VISION_MODEL,
+      max_tokens: 150,
+      temperature: 0,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: FRAME_PROMPT },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}`, detail: 'low' } },
+        ],
+      }],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`OpenAI vision ${res.status}: ${(await res.text()).slice(0, 160)}`);
+  }
+  const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+  return data.choices?.[0]?.message?.content?.trim() || null;
+}
+
+// --- Vision backend: Anthropic Messages API --------------------------------
+async function describeFrameViaAnthropic(b64: string): Promise<string | null> {
+  const res = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: VISION_MODEL,
+      max_tokens: 150,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+          { type: 'text', text: FRAME_PROMPT },
+        ],
+      }],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Anthropic vision ${res.status}: ${(await res.text()).slice(0, 160)}`);
+  }
+  const data = await res.json() as { content?: Array<{ type: string; text?: string }> };
+  const text = (data.content ?? []).filter(b => b.type === 'text').map(b => b.text ?? '').join(' ').trim();
+  return text || null;
+}
+
+async function describeFrame(framePath: string, backend: Exclude<VisionBackend, null>): Promise<string | null> {
+  try {
+    const b64 = (await readFile(framePath)).toString('base64');
+    const raw = backend === 'anthropic'
+      ? await describeFrameViaAnthropic(b64)
+      : await describeFrameViaOpenAI(b64);
+    if (!raw) return null;
+    // Enforce the ≤200-char criterion; collapse whitespace/newlines.
+    const clean = raw.replace(/\s+/g, ' ').trim();
+    return clean.length > 200 ? `${clean.slice(0, 197)}...` : clean;
+  } catch (err) {
+    console.error('[frames] vision error:', (err as Error).message);
+    return null;
+  }
+}
+
+// Orchestrate: extract frames from a local video, describe each in parallel,
+// return a formatted `[Frames]:` section (or null if nothing usable / disabled).
+async function analyzeFrames(videoPath: string, prefix: string, durationSec: number): Promise<string | null> {
+  const backend = resolveVisionBackend();
+  if (!backend) return null;
+  try {
+    const frames = await extractFrames(videoPath, prefix, durationSec);
+    if (frames.length === 0) return null;
+    const descriptions = await Promise.all(frames.map(f => describeFrame(f.path, backend)));
+    // Clean up frame JPEGs.
+    for (const f of frames) { try { unlinkSync(f.path); } catch { /* ignore */ } }
+    const lines = frames
+      .map((f, i) => ({ ts: f.ts, desc: descriptions[i] }))
+      .filter(x => x.desc)
+      .map(x => `${formatTimestamp(x.ts)} — ${x.desc}`);
+    if (lines.length === 0) return null;
+    console.log(`[frames] ${backend}: ${lines.length}/${frames.length} frames described (${prefix})`);
+    return `[Frames]:\n${lines.join('\n')}`;
+  } catch (err) {
+    console.error('[frames] analyze error:', (err as Error).message);
+    return null;
+  }
+}
+
 export async function processVideo(filePath: string, messageId: number): Promise<string | null> {
   ensureMediaDir();
   // Re-encode to mono 16 kHz MP3 (compact + universally accepted by OpenAI and whisper.cpp).
   // WAV at 16 kHz would routinely blow past 25 MB for >10-min videos on the cloud backend.
   const audioPath = path.join(MEDIA_DIR, `vid_${messageId}.mp3`);
   try {
-    await execFileP('ffmpeg', [
+    const duration = await probeDuration(filePath);
+    // Audio extraction is isolated so a silent / audio-less video still gets frames.
+    const transcribePromise = execFileP('ffmpeg', [
       '-y',
       '-i', filePath,
       '-vn',
@@ -259,15 +475,73 @@ export async function processVideo(filePath: string, messageId: number): Promise
       '-b:a', '32k',
       '-f', 'mp3',
       audioPath,
-    ], { timeout: 120000 });
+    ], { timeout: 120000 })
+      .then(() => transcribeAudio(audioPath))
+      .catch((err: Error) => {
+        console.error('[video] audio extraction error:', err.message);
+        return null;
+      });
 
-    const text = await transcribeAudio(audioPath);
-    return text ? `[video transcription] ${text}` : null;
+    const [text, frames] = await Promise.all([
+      transcribePromise,
+      analyzeFrames(filePath, `vid_${messageId}`, duration),
+    ]);
+    if (!text && !frames) return null;
+    const parts: string[] = [];
+    if (text) parts.push(`[video transcription] ${text}`);
+    if (frames) parts.push(frames);
+    return parts.join('\n\n');
   } catch (err) {
     console.error('[video] extraction error:', (err as Error).message);
     return null;
   } finally {
     try { unlinkSync(audioPath); } catch { /* ignore */ }
+  }
+}
+
+// Audio-only path (original behaviour): yt-dlp extracts mp3, then transcribe.
+// Used as the fallback when frame vision is off, or when the video download failed.
+async function downloadAndTranscribeAudio(url: string, prefix: string): Promise<string | null> {
+  const outputTemplate = path.join(MEDIA_DIR, `${prefix}.%(ext)s`);
+  await execFileP('yt-dlp', [
+    '-x',
+    '--audio-format', 'mp3',
+    '--audio-quality', '5', // good enough for speech, smaller file
+    '--max-filesize', MAX_FILESIZE,
+    '--no-playlist',
+    '--no-warnings',
+    '-o', outputTemplate,
+    url,
+  ], { timeout: 180000 });
+
+  const audioFile = readdirSync(MEDIA_DIR)
+    .filter(f => f.startsWith(`${prefix}.`))
+    .find(f => f.endsWith('.mp3'));
+  if (!audioFile) return null;
+  return transcribeAudio(path.join(MEDIA_DIR, audioFile));
+}
+
+// Download the video itself (capped) so we can derive both audio and key frames
+// from a single fetch. Returns the local video path, or null on failure.
+async function downloadVideo(url: string, prefix: string): Promise<string | null> {
+  const outputTemplate = path.join(MEDIA_DIR, `${prefix}_v.%(ext)s`);
+  try {
+    await execFileP('yt-dlp', [
+      '-f', 'best*[height<=720]/best',
+      '--max-filesize', MAX_VIDEO_FILESIZE,
+      '--no-playlist',
+      '--no-warnings',
+      '--merge-output-format', 'mp4',
+      '-o', outputTemplate,
+      url,
+    ], { timeout: 180000 });
+    const vid = readdirSync(MEDIA_DIR)
+      .filter(f => f.startsWith(`${prefix}_v.`))
+      .find(f => /\.(mp4|mkv|webm|mov)$/i.test(f));
+    return vid ? path.join(MEDIA_DIR, vid) : null;
+  } catch (err) {
+    console.error('[yt-dlp] video download error:', (err as Error).message);
+    return null;
   }
 }
 
@@ -283,36 +557,47 @@ export async function processUrl(url: string, messageId: number): Promise<string
     return `${header}\n[transcription skipped: duration > ${MAX_DURATION_SEC / 60} min]`;
   }
 
-  const outputTemplate = path.join(MEDIA_DIR, `url_${messageId}.%(ext)s`);
   const cleanupPrefix = `url_${messageId}`;
+  const wantFrames = resolveVisionBackend() !== null;
 
   try {
-    await execFileP('yt-dlp', [
-      '-x',
-      '--audio-format', 'mp3',
-      '--audio-quality', '5', // good enough for speech, smaller file
-      '--max-filesize', MAX_FILESIZE,
-      '--no-playlist',
-      '--no-warnings',
-      '-o', outputTemplate,
-      url,
-    ], { timeout: 180000 });
+    let text: string | null = null;
+    let frames: string | null = null;
+    let gotVideo = false;
 
-    // find downloaded file
-    const files = readdirSync(MEDIA_DIR).filter(f => f.startsWith(cleanupPrefix));
-    const audioFile = files.find(f => f.endsWith('.mp3'));
-    if (!audioFile) {
-      return `${header}\n[transcription failed: audio download produced no file]`;
+    if (wantFrames) {
+      // One fetch → both transcription (via local ffmpeg audio extract) and frames.
+      const videoPath = await downloadVideo(url, cleanupPrefix);
+      if (videoPath) {
+        gotVideo = true;
+        const audioPath = path.join(MEDIA_DIR, `${cleanupPrefix}.mp3`);
+        try {
+          await execFileP('ffmpeg', [
+            '-y', '-i', videoPath, '-vn', '-ar', '16000', '-ac', '1', '-b:a', '32k', '-f', 'mp3', audioPath,
+          ], { timeout: 120000 });
+          [text, frames] = await Promise.all([
+            transcribeAudio(audioPath),
+            analyzeFrames(videoPath, cleanupPrefix, metadata.duration),
+          ]);
+        } finally {
+          try { unlinkSync(audioPath); } catch { /* ignore */ }
+        }
+      }
     }
 
-    const audioPath = path.join(MEDIA_DIR, audioFile);
-    const text = await transcribeAudio(audioPath);
+    // Fallback to the audio-only path when frames are off or the video fetch failed.
+    if (!gotVideo) {
+      text = await downloadAndTranscribeAudio(url, cleanupPrefix);
+    }
 
-    if (!text) {
+    if (!text && !frames) {
       return `${header}\n[transcription failed]`;
     }
 
-    return `${header}\n\n[Transcription]:\n${text}`;
+    const parts: string[] = [header];
+    if (text) parts.push(`[Transcription]:\n${text}`);
+    if (frames) parts.push(frames);
+    return parts.join('\n\n');
   } catch (err) {
     console.error('[yt-dlp] download/transcribe error:', (err as Error).message);
     return `${header}\n[transcription failed: ${(err as Error).message}]`;
