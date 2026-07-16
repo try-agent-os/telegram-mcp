@@ -128,13 +128,15 @@ export function countIndexState(): { indexed: number; pending: number } {
 }
 
 // Embed and index up to maxRows not-yet-indexed messages. Returns rows indexed.
-export async function indexPending(maxRows = 512, batchSize = 16): Promise<number> {
+// `order: 'desc'` lets a second backfill process work from the newest end so
+// two processes meet in the middle (duplicate inserts are tolerated).
+export async function indexPending(maxRows = 512, batchSize = 16, order: 'asc' | 'desc' = 'asc'): Promise<number> {
   const db = initSemantic();
   const rows = db.prepare(`
     SELECT m.id, m.text FROM msgs.messages m
     WHERE LENGTH(COALESCE(m.text, '')) >= 3
       AND m.id NOT IN (SELECT rowid FROM message_vec)
-    ORDER BY m.id
+    ORDER BY m.id ${order === 'desc' ? 'DESC' : 'ASC'}
     LIMIT ?
   `).all(maxRows) as { id: number; text: string }[];
   if (rows.length === 0) return 0;

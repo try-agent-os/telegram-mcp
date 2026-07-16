@@ -11,7 +11,7 @@ async function main() {
   const t0 = Date.now();
   let total = 0;
   for (;;) {
-    const n = await indexPending(256);
+    const n = await indexPending(256, 16, (process.env.BACKFILL_ORDER === 'desc' ? 'desc' : 'asc'));
     if (n === 0) break;
     total += n;
     const rate = total / ((Date.now() - t0) / 1000);
