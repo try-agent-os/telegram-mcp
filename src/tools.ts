@@ -21,6 +21,7 @@ function buildInlineKeyboard(rows: ButtonRows | undefined): InlineKeyboard | und
   return kb;
 }
 import { saveMessage, searchMessages, getMessageByTelegramId, getRecent, listChats, getLastIncomingMessageId, listUsers, getUnansweredMessages } from './db.js';
+import { semanticSearchMessages } from './semantic.js';
 import { approveUser, denyUser, getTimezone, setTimezone } from './access.js';
 import { botExchangeTracker, parseCoordinationChats } from './group-routing.js';
 
@@ -250,6 +251,27 @@ export function getToolDefinitions() {
           limit: { type: 'number', description: 'Max results (default 20)' },
           days: { type: 'number', description: 'Search last N days (optional)' },
         },
+      },
+    },
+    {
+      name: 'telegram_semantic_search',
+      description: 'Semantic (meaning-based) search across message history using local embeddings, hybrid with full-text. ' +
+        'Use for paraphrased/conceptual queries where exact words are unknown or ASR-mangled (e.g. "когда перечислял свои долги", "что решали про домены"). ' +
+        'Supports date-range filters and recency boost. Returns messages with chat_id, date, direction, display_name and a fused relevance score.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          query: { type: 'string', description: 'Natural-language query (meaning matters, exact words do not)' },
+          chat_id: { type: 'number', description: 'Filter by chat ID (optional)' },
+          direction: { type: 'string', enum: ['in', 'out'], description: 'Filter by direction (optional; in = from user, out = from bot)' },
+          limit: { type: 'number', description: 'Max results (default 10, max 50)' },
+          days: { type: 'number', description: 'Only messages from the last N days (optional)' },
+          date_from: { type: 'string', description: 'Only messages on/after this UTC date, YYYY-MM-DD or ISO datetime (optional)' },
+          date_to: { type: 'string', description: 'Only messages on/before this UTC date, YYYY-MM-DD or ISO datetime (optional)' },
+          mode: { type: 'string', enum: ['hybrid', 'semantic', 'fts'], description: 'Retrieval mode (default hybrid = vector + full-text fusion)' },
+          recency_boost: { type: 'boolean', description: 'Boost fresher messages (default true). Set false for pure relevance.' },
+        },
+        required: ['query'],
       },
     },
     {
@@ -507,6 +529,17 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
         return { messages: [], total: 0, error: 'query or message_id required' };
       }
       return searchMessages(query, chat_id, direction, limit, days);
+    }
+
+    case 'telegram_semantic_search': {
+      const { query, chat_id, direction, limit, days, date_from, date_to, mode, recency_boost } = args as {
+        query: string; chat_id?: number; direction?: 'in' | 'out'; limit?: number; days?: number;
+        date_from?: string; date_to?: string; mode?: 'hybrid' | 'semantic' | 'fts'; recency_boost?: boolean;
+      };
+      if (!query || query.trim().length === 0) {
+        return { results: [], error: 'query required' };
+      }
+      return semanticSearchMessages({ query, chat_id, direction, limit, days, date_from, date_to, mode, recency_boost });
     }
 
     case 'telegram_get_recent': {

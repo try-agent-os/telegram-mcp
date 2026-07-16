@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.145",
+    "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^11.8.2",
     "dotenv": "^16.5.0",
@@ -22,6 +23,7 @@
     "grammy": "^1.35.0",
     "http-proxy-middleware": "^3.0.7",
     "nodejs-whisper": "^0.3.0",
+    "sqlite-vec": "^0.1.9",
     "zod": "^4.4.3"
   },
   "devDependencies": {

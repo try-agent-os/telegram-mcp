@@ -7,3 +7,6 @@ access.json
 messages.json
 .claude/
 .session-state.json
+semantic.db
+semantic.db-*
+hf-cache/

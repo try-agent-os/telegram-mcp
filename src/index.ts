@@ -152,6 +152,18 @@ async function main() {
   initDb();
   console.log('[telegram-mcp] Database initialized');
 
+  // Semantic index (local embeddings, separate semantic.db). Non-fatal: the
+  // bot and the classic FTS search must keep working even if the vector stack
+  // fails to initialize (missing native ext, first-run model download, etc.).
+  try {
+    const { initSemantic, startBackgroundIndexer } = await import('./semantic.js');
+    initSemantic();
+    startBackgroundIndexer();
+    console.log('[telegram-mcp] Semantic index initialized (background indexer on)');
+  } catch (err) {
+    console.error(`[telegram-mcp] Semantic index unavailable: ${(err as Error).message}`);
+  }
+
   // Seed admins from env (multi-admin support).
   // TELEGRAM_ADMIN_USER_IDS = comma-separated numeric IDs (preferred).
   // TELEGRAM_USER_ID = legacy single-admin fallback.
