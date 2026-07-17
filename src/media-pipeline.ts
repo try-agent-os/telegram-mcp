@@ -76,7 +76,7 @@ const FRAMES_DISABLED = /^(1|true|yes)$/i.test(process.env.MEDIA_FRAMES_DISABLED
 const FRAME_COUNT_OVERRIDE = parseInt(process.env.MEDIA_FRAME_COUNT ?? '', 10);
 // Vision downloads a full-resolution video; cap it well below yt-dlp's audio ceiling.
 const MAX_VIDEO_FILESIZE = process.env.MEDIA_MAX_VIDEO_FILESIZE ?? '60M';
-// Frame description prompt — Russian, since the operator/Vasily read Russian.
+// Frame description prompt — Russian, since the operator reads Russian.
 const FRAME_PROMPT =
   'Опиши кратко, одним-двумя предложениями (максимум 200 символов), что показано на этом кадре из видео: ' +
   'текст на экране, UI/дашборд, объекты, действие. Без вступлений и кавычек — только описание.';
