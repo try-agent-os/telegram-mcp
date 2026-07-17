@@ -7,6 +7,7 @@ import { checkAccess, touchUser } from './access.js';
 import { createCommands } from './commands/index.js';
 import { getUser, saveMessage } from './db.js';
 import { maybeAutospawn } from './autospawn.js';
+import type { SessionInfo } from './session-status.js';
 import {
   shouldNotifyAgent,
   isMentionedInText,
@@ -177,6 +178,12 @@ export function formatVenueText(title: string, address: string | null, lat: numb
 export interface BotOptions {
   getSessionCount: () => number;
   getUptime: () => number;
+  /**
+   * Per-session breakdown for `/status`. Optional so the SDK-spawn entrypoint
+   * (main.ts) that has no SSE session registry can omit it and fall back to the
+   * bare count. See session-status.ts for the field-availability caveats.
+   */
+  getSessions?: () => SessionInfo[];
 }
 
 // Optional override: chat ids listed in `TELEGRAM_ALWAYS_ENGAGE_GROUPS` (comma-
