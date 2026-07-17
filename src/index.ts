@@ -13,6 +13,7 @@ import { getToolDefinitions, handleToolCall } from './tools.js';
 import { getTimezone } from './access.js';
 import { mountConsole, publicGuard } from './console/routes.js';
 import { SessionRegistry, parseBindUserId } from './user-routing.js';
+import type { SessionInfo } from './session-status.js';
 import type { Bot } from 'grammy';
 
 const PORT = parseInt(process.env.PORT ?? '3848', 10);
@@ -29,11 +30,34 @@ process.on('unhandledRejection', (reason) => {
 // Track active MCP server instances for channel push
 const activeSessions = new Map<string, Server>();
 
+// Connect timestamp (epoch ms) per SSE session, for the /status age column.
+const sessionConnectedAt = new Map<string, number>();
+
 // Per-user session routing. A session can bind a user_id at /sse connect
 // (?user_id=). Until ANY session binds, this is inert and every push goes to
 // every session (legacy single-operator broadcast). Once bound, pushes are
 // routed by meta.user_id. See src/user-routing.ts.
 const sessionRegistry = new SessionRegistry();
+
+// Build the per-session breakdown rendered by `/status`. Reads what the MCP
+// server legitimately knows about each connected client: its bound user (from
+// the routing registry), its MCP clientInfo (name+version from the initialize
+// handshake, undefined until the handshake completes), and its connect time.
+// Model / context-window fill are intentionally absent — see session-status.ts.
+function buildSessionInfos(): SessionInfo[] {
+  const infos: SessionInfo[] = [];
+  for (const [id, server] of activeSessions) {
+    const impl = server.getClientVersion();
+    infos.push({
+      id,
+      boundUserId: sessionRegistry.boundUser(id) ?? null,
+      clientName: impl?.name,
+      clientVersion: impl?.version,
+      connectedAt: sessionConnectedAt.get(id) ?? Date.now(),
+    });
+  }
+  return infos;
+}
 
 // Push a channel notification only to the session(s) routeTargets() selects.
 // Centralizes the routing decision so all four push paths (message/reaction/
@@ -189,6 +213,7 @@ async function main() {
   const bot = createBot(token, {
     getSessionCount: () => activeSessions.size,
     getUptime: () => (Date.now() - startTime) / 1000,
+    getSessions: buildSessionInfos,
   });
 
   // Handle incoming Telegram messages — push to all connected Claude sessions
@@ -335,12 +360,14 @@ async function main() {
     // broadcasts (legacy behavior).
     const boundUserId = parseBindUserId(req.query.user_id);
     sessionRegistry.connect(sessionId, boundUserId || null);
+    sessionConnectedAt.set(sessionId, Date.now());
     console.log(`[connect] session=${sessionId}${boundUserId ? ` user_id=${boundUserId}` : ' (unbound/admin)'}`);
 
     transport.onclose = () => {
       console.log(`[disconnect] session=${sessionId}`);
       transports.delete(sessionId);
       activeSessions.delete(sessionId);
+      sessionConnectedAt.delete(sessionId);
       sessionRegistry.disconnect(sessionId);
     };
 
@@ -522,6 +549,7 @@ async function main() {
     }
     transports.clear();
     activeSessions.clear();
+    sessionConnectedAt.clear();
     httpServer.close();
     await bot.stop();
     process.exit(0);

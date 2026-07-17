@@ -1,6 +1,7 @@
 import { Composer } from 'grammy';
 import { checkAccess } from '../access.js';
 import type { BotOptions } from '../bot.js';
+import { buildStatusText } from '../session-status.js';
 
 export function createStatusCommand(options?: BotOptions) {
   const composer = new Composer();
@@ -14,8 +15,20 @@ export function createStatusCommand(options?: BotOptions) {
       return;
     }
 
-    const sessions = options?.getSessionCount?.() ?? 0;
     const uptime = options?.getUptime?.() ?? 0;
+
+    // Prefer the per-session breakdown when the entrypoint provides one (the SSE
+    // bridge in index.ts). Fall back to the bare count for entrypoints that
+    // don't track a session registry (main.ts SDK-spawn path).
+    if (options?.getSessions) {
+      const sessions = options.getSessions();
+      await ctx.reply(
+        buildStatusText({ sessions, uptimeSeconds: uptime, now: Date.now() }),
+      );
+      return;
+    }
+
+    const sessions = options?.getSessionCount?.() ?? 0;
     const h = Math.floor(uptime / 3600);
     const m = Math.floor((uptime % 3600) / 60);
     await ctx.reply(
