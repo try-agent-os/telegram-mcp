@@ -12,7 +12,8 @@ import { createBot, onIncomingMessage, onReaction, onCallbackQuery } from './bot
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import { getTimezone } from './access.js';
 import { mountConsole, publicGuard } from './console/routes.js';
-import { SessionRegistry, parseBindUserId } from './user-routing.js';
+import { SessionRegistry, parseBindUserId, normalizeUserId } from './user-routing.js';
+import { isAutospawnEnabled } from './autospawn.js';
 import type { SessionInfo } from './session-status.js';
 import type { Bot } from 'grammy';
 
@@ -38,6 +39,12 @@ const sessionConnectedAt = new Map<string, number>();
 // every session (legacy single-operator broadcast). Once bound, pushes are
 // routed by meta.user_id. See src/user-routing.ts.
 const sessionRegistry = new SessionRegistry();
+
+// Multi-user instance? (MULTIUSER_AUTOSPAWN). An EXPLICIT config signal so the
+// router never infers "single-operator, safe to broadcast" from a transient
+// zero-binding window while a per-user session is reconnecting. Evaluated once
+// at boot — env is fixed for the process lifetime. See user-routing.routeTargets.
+const MULTIUSER = isAutospawnEnabled();
 
 // Build the per-session breakdown rendered by `/status`. Reads what the MCP
 // server legitimately knows about each connected client: its bound user (from
@@ -71,7 +78,23 @@ function pushToTargets(
     activeSessions.keys(),
     opts.userId,
     opts.isAdminOrSystem ?? false,
+    MULTIUSER,
   );
+  // Fail-safe visibility: on a multi-user instance a known user's message with no
+  // live bound session is intentionally NOT delivered to the owner/admin sink
+  // (cross-user leak). It stays persisted as unanswered; autospawn spawns the
+  // user's session, which replays it. Log so the delivery watchdog / operator can
+  // see the queue happened — WITHOUT echoing the message content.
+  if (
+    MULTIUSER &&
+    targets.length === 0 &&
+    !(opts.isAdminOrSystem ?? false) &&
+    normalizeUserId(opts.userId)
+  ) {
+    console.warn(
+      `[route] queued ${opts.label} for user ${normalizeUserId(opts.userId)} — no live session; awaiting autospawn/replay (NOT routed to admin)`,
+    );
+  }
   for (const sid of targets) {
     const server = activeSessions.get(sid);
     if (!server) continue;
@@ -381,14 +404,22 @@ async function main() {
     // Per-user routing: a session bound to a user_id replays ONLY that user's
     // unanswered backlog (getUnansweredMessagesForUser) — otherwise a freshly
     // spawned per-user session would receive the whole instance's missed
-    // traffic. An unbound (admin) session replays the global backlog exactly
-    // as before. Each replayed push still goes through pushToTargets so the
-    // routing filter applies (a global-backlog row for a user who has their own
-    // bound session won't be mis-delivered to the admin session).
+    // traffic.
+    //
+    // The UNBOUND (admin) session:
+    //   - single-operator instance -> replays the global backlog exactly as
+    //     before (it IS the one session that owns every DM thread).
+    //   - multi-user instance -> replays NOTHING. The global private backlog
+    //     (getUnansweredMessages filters chat_id > 0) is entirely per-user DMs
+    //     that belong to per-user sessions. Replaying it on the admin sink would
+    //     (a) pre-fix, re-leak every user's DM to the owner, and (b) still bump
+    //     each row's replay_count toward the REPLAY_MAX circuit breaker without
+    //     delivering to the user — so under SSE churn a user's message would be
+    //     suppressed before their own session ever replays it. Fixed 2026-07-22.
     setTimeout(() => {
       const missed = boundUserId
         ? getUnansweredMessagesForUser(Number(boundUserId), 24)
-        : getUnansweredMessages(24);
+        : (MULTIUSER ? [] : getUnansweredMessages(24));
       if (missed.length === 0) return;
       console.log(`[replay] session=${sessionId}${boundUserId ? ` user_id=${boundUserId}` : ''}: replaying ${missed.length} unanswered message(s)`);
       for (const msg of missed) {

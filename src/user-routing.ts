@@ -88,36 +88,61 @@ export class SessionRegistry {
    * @param userId  the message's meta.user_id (string|number|null).
    * @param isAdminOrSystem  true for traffic that must always reach the
    *        admin/fallback session(s) regardless of user (worker reports, peer
-   *        relays, evening-reminders, etc.). Routed to unbound sessions.
+   *        relays, evening-reminders, group messages, etc.). Routed to unbound
+   *        sessions.
+   * @param multiUser  true for a multi-user instance (MULTIUSER_AUTOSPAWN). This
+   *        is an EXPLICIT, config-level signal — NOT inferred from transient
+   *        `hasAnyBinding()`. A per-user instance whose users' sessions flap must
+   *        not momentarily revert to owner-broadcast (that is the cross-user leak
+   *        fixed 2026-07-22).
    *
-   * Rules (in order):
+   * Single-operator (multiUser=false) — legacy behavior, byte-for-byte:
    *  1. No binding exists anywhere  -> ALL sessions (legacy broadcast, hub-safe).
-   *  2. Admin/system message        -> unbound sessions (fallback). If there are
-   *                                    none, ALL sessions (never drop a system msg).
+   *  2. Admin/system message        -> unbound sessions (fallback). If none, ALL.
    *  3. User has bound session(s)    -> exactly those session(s).
-   *  4. User has NO bound session    -> unbound sessions (so the admin/operator
-   *                                    still sees a not-yet-routed user). If none,
-   *                                    ALL sessions.
+   *  4. User has NO bound session    -> unbound sessions (admin sees the not-yet-
+   *                                    routed user). If none, ALL.
+   *
+   * Multi-user (multiUser=true) — STRICT per-user isolation, no owner fallback:
+   *  A. Admin/system message         -> unbound (owner oversight) sink; if none, ALL.
+   *  B. Attributable user message     -> ONLY that user's bound session(s). If the
+   *                                    user has NO live session, deliver to NOBODY
+   *                                    ([]). The message is already persisted as
+   *                                    unanswered; autospawn spawns the user's
+   *                                    session, which replays it on connect.
+   *                                    NEVER broadcast / fall back to the owner.
+   *  C. Unattributable non-admin msg  -> unbound sink (can't scope to a user, so
+   *                                    it is not a cross-user leak; don't drop it).
    */
   routeTargets(
     allSessionIds: Iterable<string>,
     userId?: string | number | null,
     isAdminOrSystem = false,
+    multiUser = false,
   ): string[] {
     const all = [...allSessionIds];
+    const unbound = all.filter((s) => !this.bindings.has(s));
+    const uid = normalizeUserId(userId);
+
+    if (multiUser) {
+      // Rule A: admin/system traffic -> owner/admin oversight sink.
+      if (isAdminOrSystem) return unbound.length > 0 ? unbound : all;
+      // Rule B: attributable user message -> only that user's session(s). Empty
+      // is intentional (queue + autospawn/replay), NOT a fallback to the owner.
+      if (uid) return all.filter((s) => this.bindings.get(s) === uid);
+      // Rule C: no user_id and not admin (pathological for private chats).
+      return unbound.length > 0 ? unbound : all;
+    }
 
     // Rule 1: backward-compatible broadcast when nobody has bound. This is the
     // hub's single-operator case and MUST stay identical to the old behavior.
     if (!this.hasAnyBinding()) return all;
-
-    const unbound = all.filter((s) => !this.bindings.has(s));
 
     // Rule 2: admin/system traffic goes to the fallback (unbound) sink.
     if (isAdminOrSystem) {
       return unbound.length > 0 ? unbound : all;
     }
 
-    const uid = normalizeUserId(userId);
     if (uid) {
       const targeted = all.filter((s) => this.bindings.get(s) === uid);
       // Rule 3: the user has at least one bound session -> deliver only there.
