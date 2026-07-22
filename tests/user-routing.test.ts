@@ -110,6 +110,63 @@ test('safety: bound users exist but NO unbound admin session → never drop', ()
   assert.deepEqual(reg.routeTargets(all, '111'), ['s-alice']);
 });
 
+// ── (d) MULTI-USER STRICT ISOLATION (MULTIUSER_AUTOSPAWN) ────────────────────
+// On a multi-user instance the router must NEVER broadcast or fall a known
+// user's private message back to the owner/admin session, even during a
+// transient window where that user's sessions have all disconnected. Regression
+// guard for the 2026-07-22 cross-user leak (Rita's CSV → owner session).
+test('multiuser: known user with NO live session → nobody (queue), never owner', () => {
+  const reg = new SessionRegistry();
+  reg.connect('owner'); // the ONLY live session is the unbound owner/admin sink
+  const all = ['owner'];
+  // Rita (8113361116) — her per-user sessions all churned/disconnected. In
+  // single-operator mode this would broadcast to 'owner' (the old leak); in
+  // multi-user mode it must route to NOBODY (message stays queued as unanswered,
+  // autospawn respawns her session which replays it on connect).
+  assert.deepEqual(reg.routeTargets(all, '8113361116', false, /*multiUser*/ true), []);
+  // And it certainly must not reach the owner.
+  assert.ok(!reg.routeTargets(all, '8113361116', false, true).includes('owner'));
+});
+
+test('multiuser: even with zero bindings, a user message never broadcasts', () => {
+  const reg = new SessionRegistry();
+  reg.connect('owner');
+  reg.connect('owner2');
+  const all = ['owner', 'owner2'];
+  // hasAnyBinding() is false here — single-operator mode would broadcast to all.
+  // Multi-user mode routes strictly by user_id → nobody live for this user → [].
+  assert.deepEqual(reg.routeTargets(all, '555', false, true), []);
+});
+
+test('multiuser: known user WITH a live session → only that session', () => {
+  const reg = new SessionRegistry();
+  reg.connect('owner');
+  reg.connect('s-rita', '8113361116');
+  const all = ['owner', 's-rita'];
+  assert.deepEqual(reg.routeTargets(all, '8113361116', false, true), ['s-rita']);
+  assert.ok(!reg.routeTargets(all, '8113361116', false, true).includes('owner'));
+});
+
+test('multiuser: admin/system traffic still reaches the owner sink', () => {
+  const reg = new SessionRegistry();
+  reg.connect('owner');
+  reg.connect('s-rita', '8113361116');
+  const all = ['owner', 's-rita'];
+  // Worker reports / peer relays / group messages legitimately reach the owner.
+  assert.deepEqual(reg.routeTargets(all, null, /*admin*/ true, /*multiUser*/ true), ['owner']);
+  assert.deepEqual(reg.routeTargets(all, '999', true, true), ['owner']);
+});
+
+test('multiuser: unattributable non-admin message (no user_id) → owner sink', () => {
+  const reg = new SessionRegistry();
+  reg.connect('owner');
+  reg.connect('s-rita', '8113361116');
+  const all = ['owner', 's-rita'];
+  // Pathological for private chats (they always carry a user_id); routed to the
+  // admin sink rather than dropped, since it cannot leak to a specific user.
+  assert.deepEqual(reg.routeTargets(all, null, false, true), ['owner']);
+});
+
 // ── lifecycle ────────────────────────────────────────────────────────────────
 test('lifecycle: disconnect drops binding and reverts to broadcast when empty', () => {
   const reg = new SessionRegistry();
