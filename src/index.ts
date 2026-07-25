@@ -371,6 +371,9 @@ async function main() {
 
   const transports = new Map<string, SSEServerTransport>();
 
+  // How often to write a keepalive comment down each idle SSE stream (see below).
+  const SSE_KEEPALIVE_MS = Number(process.env.SSE_KEEPALIVE_MS ?? 25_000);
+
   app.get('/sse', async (req, res) => {
     const transport = new SSEServerTransport('/messages', res);
     const sessionId = transport.sessionId;
@@ -386,8 +389,29 @@ async function main() {
     sessionConnectedAt.set(sessionId, Date.now());
     console.log(`[connect] session=${sessionId}${boundUserId ? ` user_id=${boundUserId}` : ' (unbound/admin)'}`);
 
+    // Keep the SSE pipe warm. SSEServerTransport writes nothing between pushes,
+    // so a bound per-user session can sit silent for minutes; a periodic comment
+    // line (ignored by the client per the SSE spec) stops intermediaries and the
+    // client read side from reaping the connection as dead. Paired with disabling
+    // Node's requestTimeout on the server (see app.listen below), this is what
+    // keeps a per-user binding alive for hours instead of the ~5-min SSE-churn
+    // cycle that opened the cross-user routing window (task 86cavaynf).
+    const keepAlive = setInterval(() => {
+      try { res.write(': ping\n\n'); } catch { /* socket already gone */ }
+    }, SSE_KEEPALIVE_MS);
+
+    // Replay is armed on a 3s delay (below). If this session dies BEFORE that
+    // timer fires — the exact <3s lifetime seen under SSE-churn — the timer would
+    // otherwise still run, push into a dead/unbound transport (message lost) AND
+    // bump replay_count toward the REPLAY_MAX circuit breaker, permanently
+    // suppressing that row before the user's real session ever replays it. Cancel
+    // it on disconnect so a short-lived binding never burns the backlog (86cavaynf).
+    let replayTimer: ReturnType<typeof setTimeout> | undefined;
+
     transport.onclose = () => {
       console.log(`[disconnect] session=${sessionId}`);
+      clearInterval(keepAlive);
+      if (replayTimer) clearTimeout(replayTimer);
       transports.delete(sessionId);
       activeSessions.delete(sessionId);
       sessionConnectedAt.delete(sessionId);
@@ -416,7 +440,10 @@ async function main() {
     //     each row's replay_count toward the REPLAY_MAX circuit breaker without
     //     delivering to the user — so under SSE churn a user's message would be
     //     suppressed before their own session ever replays it. Fixed 2026-07-22.
-    setTimeout(() => {
+    replayTimer = setTimeout(() => {
+      // Belt-and-suspenders: if the session vanished in the last tick, do not
+      // touch the backlog (onclose clears this timer, but guard the race too).
+      if (!transports.has(sessionId)) return;
       const missed = boundUserId
         ? getUnansweredMessagesForUser(Number(boundUserId), 24)
         : (MULTIUSER ? [] : getUnansweredMessages(24));
@@ -563,6 +590,16 @@ async function main() {
     console.log(`[telegram-mcp] SSE listening on http://localhost:${PORT}`);
     console.log(`[telegram-mcp] SSE endpoint: http://localhost:${PORT}/sse`);
   });
+
+  // /sse responses are intentionally endless — SSEServerTransport never calls
+  // res.end(); it streams pushes until the client goes away. Node's default
+  // server.requestTimeout (300_000ms since Node 18) destroys any socket whose
+  // request/response has not completed inside that window, so it silently kills
+  // every long-lived SSE connection at ~5 min and forces a reconnect. That is the
+  // per-user SSE-churn (9k+ reconnects) behind task 86cavaynf. Disable it; the
+  // header-phase slowloris guard (headersTimeout, 60s) stays in force and the
+  // short /messages, /console and /health requests are unaffected.
+  httpServer.requestTimeout = 0;
 
   // Start bot (non-blocking)
   bot.start({
