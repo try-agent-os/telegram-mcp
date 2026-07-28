@@ -395,7 +395,7 @@ async function main() {
     // client read side from reaping the connection as dead. Paired with disabling
     // Node's requestTimeout on the server (see app.listen below), this is what
     // keeps a per-user binding alive for hours instead of the ~5-min SSE-churn
-    // cycle that opened the cross-user routing window (task 86cavaynf).
+    // cycle that opened the cross-user routing window.
     const keepAlive = setInterval(() => {
       try { res.write(': ping\n\n'); } catch { /* socket already gone */ }
     }, SSE_KEEPALIVE_MS);
@@ -405,7 +405,7 @@ async function main() {
     // otherwise still run, push into a dead/unbound transport (message lost) AND
     // bump replay_count toward the REPLAY_MAX circuit breaker, permanently
     // suppressing that row before the user's real session ever replays it. Cancel
-    // it on disconnect so a short-lived binding never burns the backlog (86cavaynf).
+    // it on disconnect so a short-lived binding never burns the backlog.
     let replayTimer: ReturnType<typeof setTimeout> | undefined;
 
     transport.onclose = () => {
@@ -596,7 +596,7 @@ async function main() {
   // server.requestTimeout (300_000ms since Node 18) destroys any socket whose
   // request/response has not completed inside that window, so it silently kills
   // every long-lived SSE connection at ~5 min and forces a reconnect. That is the
-  // per-user SSE-churn (9k+ reconnects) behind task 86cavaynf. Disable it; the
+  // per-user SSE-churn (9k+ reconnects) observed in production. Disable it; the
   // header-phase slowloris guard (headersTimeout, 60s) stays in force and the
   // short /messages, /console and /health requests are unaffected.
   httpServer.requestTimeout = 0;
