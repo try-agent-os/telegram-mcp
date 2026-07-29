@@ -7,7 +7,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import os from 'os';
-import { initDb, seedAdmins, getUnansweredMessages, getUnansweredMessagesForUser, saveMessage, bumpReplayCount } from './db.js';
+import { initDb, seedAdmins, getUnansweredMessages, getUnansweredMessagesForUser, saveMessage, bumpReplayCount, REPLAY_MAX } from './db.js';
 import { createBot, onIncomingMessage, onReaction, onCallbackQuery } from './bot.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import { getTimezone } from './access.js';
@@ -475,7 +475,24 @@ async function main() {
         }, { userId: msg.user_id ?? msg.chat_id, label: `replay msg ${msg.id}` });
         // Bump replay_count so the circuit breaker in getUnansweredMessages
         // eventually stops re-surfacing this row if no OUT reply ever lands.
-        try { bumpReplayCount(msg.id); } catch (e) {
+        // When the bump reaches REPLAY_MAX the row is about to become permanently
+        // unrecoverable — do NOT drop it silently (the second half of incident
+        // 86cau9ndb: Rita's 4 messages all stuck at replay_count=3, no alert).
+        // Fire a one-shot alert to the admins so a human sees the still-unanswered
+        // message. Fires exactly once per row (the bump to REPLAY_MAX happens once).
+        try {
+          const newCount = bumpReplayCount(msg.id);
+          if (newCount >= REPLAY_MAX) {
+            const who = msg.username ? `@${msg.username}` : (msg.display_name ?? String(msg.chat_id));
+            const preview = (msg.text ?? '(no text)').slice(0, 300);
+            const capAlert = `⚠️ [telegram-mcp] Сообщение от ${who} (chat ${msg.chat_id}, msg ${msg.telegram_message_id}) достигло replay cap (REPLAY_MAX=${REPLAY_MAX}) БЕЗ ответа оператора — больше НЕ будет авто-переигрываться. Оригинал:\n${preview}`;
+            for (const adminId of adminIds) {
+              bot.api.sendMessage(adminId, capAlert).catch((e: Error) =>
+                console.error(`[replay] cap alert to admin ${adminId} failed: ${e.message}`));
+            }
+            console.warn(`[replay] msg ${msg.id} hit REPLAY_MAX=${REPLAY_MAX} unanswered — alerted ${adminIds.length} admin(s)`);
+          }
+        } catch (e) {
           console.error(`[replay] Failed to bump replay_count for msg ${msg.id}: ${(e as Error).message}`);
         }
       }
@@ -566,6 +583,9 @@ async function main() {
             display_name: null,
             text: full,
             direction: 'out',
+            // Alert, not an operator reply — must not mark the admin's inbound
+            // messages as answered (see db.getUnansweredMessages is_system filter).
+            is_system: true,
             reply_to_message_id: null,
             media_type: null,
             file_path: null,

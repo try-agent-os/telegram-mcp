@@ -99,6 +99,13 @@ export function initDb(): void {
   if (!colNames.includes('replay_count')) {
     db.prepare(`ALTER TABLE messages ADD COLUMN replay_count INTEGER NOT NULL DEFAULT 0`).run();
   }
+  // System/ack flag — OUT rows that are the bot's own acks (native /clear|/model)
+  // or emergency alerts, NOT genuine operator replies. getUnansweredMessages
+  // excludes these from the "was it answered?" check so a bot ack can't mask a
+  // real unanswered inbound question (the masking that hid incident 86cau9ndb).
+  if (!colNames.includes('is_system')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN is_system INTEGER NOT NULL DEFAULT 0`).run();
+  }
   // Geo columns — location pins carry lat/lon; venue messages add title/address
   // on top. Additive ALTER TABLE so pre-existing rows keep NULL (never broken).
   if (!colNames.includes('latitude')) {
@@ -159,15 +166,15 @@ function migrateFromAccessJson(): void {
 
 export function saveMessage(msg: Omit<TelegramMessage, 'id' | 'created_at'>): TelegramMessage {
   const stmt = db.prepare(`
-    INSERT INTO messages (telegram_message_id, chat_id, chat_type, chat_title, user_id, username, display_name, text, direction, reply_to_message_id, media_type, file_path, file_name, latitude, longitude, venue_title, venue_address)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (telegram_message_id, chat_id, chat_type, chat_title, user_id, username, display_name, text, direction, is_system, reply_to_message_id, media_type, file_path, file_name, latitude, longitude, venue_title, venue_address)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = stmt.run(
     msg.telegram_message_id, msg.chat_id,
     msg.chat_type ?? null, msg.chat_title ?? null,
     msg.user_id,
     msg.username, msg.display_name, msg.text,
-    msg.direction, msg.reply_to_message_id,
+    msg.direction, msg.is_system ? 1 : 0, msg.reply_to_message_id,
     msg.media_type ?? null, msg.file_path ?? null, msg.file_name ?? null,
     msg.latitude ?? null, msg.longitude ?? null,
     msg.venue_title ?? null, msg.venue_address ?? null
@@ -262,6 +269,12 @@ export function getLastIncomingMessageId(chatId: number): number | null {
 //     side effects (duplicate callback handling downstream).
 //   - rows with replay_count >= REPLAY_MAX (circuit breaker against any future
 //     ack-tracking bug).
+//
+// "Answered" = a NON-SYSTEM OUT row exists after the inbound row. System/ack OUT
+// rows (is_system=1: native /clear|/model acks, emergency alerts) are excluded
+// from that check — otherwise the bot's own ack marks a real unanswered question
+// as answered. That masking is exactly what hid incident 86cau9ndb: a /clear ack
+// made the user think the (dead) operator had replied.
 export const REPLAY_MAX = 3;
 export function getUnansweredMessages(sinceHours = 24): TelegramMessage[] {
   const hours = Math.max(1, Math.min(168, Number(sinceHours) || 24));
@@ -276,6 +289,7 @@ export function getUnansweredMessages(sinceHours = 24): TelegramMessage[] {
       AND NOT EXISTS (
         SELECT 1 FROM messages m2
         WHERE m2.direction = 'out'
+          AND COALESCE(m2.is_system, 0) = 0
           AND m2.chat_id = m.chat_id
           AND m2.created_at > m.created_at
       )
@@ -304,6 +318,7 @@ export function getUnansweredMessagesForUser(userId: number, sinceHours = 24): T
       AND NOT EXISTS (
         SELECT 1 FROM messages m2
         WHERE m2.direction = 'out'
+          AND COALESCE(m2.is_system, 0) = 0
           AND m2.chat_id = m.chat_id
           AND m2.created_at > m.created_at
       )
@@ -311,11 +326,17 @@ export function getUnansweredMessagesForUser(userId: number, sinceHours = 24): T
   `).all(userId) as TelegramMessage[];
 }
 
-// Bump replay_count for a row. Called after each successful [MISSED] push so
-// the circuit breaker in getUnansweredMessages eventually stops re-surfacing
-// the same row if the operator never produces an OUT reply.
-export function bumpReplayCount(id: number): void {
+// Bump replay_count for a row and return the NEW count. Called after each
+// successful [MISSED] push so the circuit breaker in getUnansweredMessages
+// eventually stops re-surfacing the same row if the operator never produces an
+// OUT reply. The returned count lets the caller detect the moment a row reaches
+// REPLAY_MAX (about to be permanently suppressed) and alert instead of silently
+// dropping it — the second half of incident 86cau9ndb (Rita's 4 messages all
+// stuck at replay_count=3, unrecoverable, no alert).
+export function bumpReplayCount(id: number): number {
   db.prepare('UPDATE messages SET replay_count = COALESCE(replay_count, 0) + 1 WHERE id = ?').run(id);
+  const row = db.prepare('SELECT replay_count FROM messages WHERE id = ?').get(id) as { replay_count: number } | undefined;
+  return row?.replay_count ?? 0;
 }
 
 // --- Users ---

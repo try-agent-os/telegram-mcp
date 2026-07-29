@@ -568,7 +568,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
         saveMessage({
           telegram_message_id: sent.message_id, chat_id: chatId, chat_type: chatType,
           chat_title: chatTitle, user_id: null, username: null, display_name: null,
-          text: ackText, direction: 'out', reply_to_message_id: msg.message_id,
+          text: ackText, direction: 'out', is_system: true, reply_to_message_id: msg.message_id,
           media_type: null, file_path: null, file_name: null,
         });
         return; // handled here — do NOT dispatch /clear to the agent
@@ -615,7 +615,7 @@ export function createBot(token: string, options?: BotOptions): Bot {
       saveMessage({
         telegram_message_id: sent.message_id, chat_id: chatId, chat_type: chatType,
         chat_title: chatTitle, user_id: null, username: null, display_name: null,
-        text: ackText, direction: 'out', reply_to_message_id: msg.message_id,
+        text: ackText, direction: 'out', is_system: true, reply_to_message_id: msg.message_id,
         media_type: null, file_path: null, file_name: null,
       });
       return; // handled here — do NOT dispatch /model to the agent

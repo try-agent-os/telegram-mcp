@@ -40,7 +40,7 @@ const OLD_SCHEMA = `
   )
 `;
 
-const NEW_COLUMNS = ['media_type', 'file_path', 'file_name', 'chat_type', 'chat_title', 'replay_count'];
+const NEW_COLUMNS = ['media_type', 'file_path', 'file_name', 'chat_type', 'chat_title', 'replay_count', 'is_system'];
 
 function messageColumns(): string[] {
   const probe = new Database(dbPath, { readonly: true });
@@ -149,4 +149,103 @@ test('unanswered: an OUT reply after the IN row answers it', () => {
     file_name: null,
   });
   assert.equal(getUnansweredMessagesForUser(3333, 24).length, 0, 'OUT reply answers the row');
+});
+
+// Regression for incident 86cau9ndb (bug 1): a SYSTEM/ack OUT row (is_system=1,
+// e.g. the native /clear ack) must NOT count as a reply, or a real unanswered
+// question is masked as answered. A genuine (non-system) OUT reply still answers.
+test('unanswered: a system/ack OUT row does NOT mask a real unanswered question', () => {
+  saveMessage({
+    telegram_message_id: 9101,
+    chat_id: 4444,
+    chat_type: 'private',
+    chat_title: null,
+    user_id: 4444,
+    username: 'rita',
+    display_name: 'Rita',
+    text: 'важный вопрос менеджера',
+    direction: 'in',
+    reply_to_message_id: null,
+    media_type: null,
+    file_path: null,
+    file_name: null,
+  });
+  // Backdate the IN row so a strictly-later OUT row is comparable (second res).
+  const probe = new Database(dbPath);
+  probe.prepare(`UPDATE messages SET created_at = datetime('now', '-60 seconds') WHERE telegram_message_id = 9101`).run();
+  probe.close();
+
+  assert.equal(getUnansweredMessagesForUser(4444, 24).length, 1, 'inbound is unanswered before any OUT');
+
+  // The bot's own /clear ack — is_system=true. Must NOT flip the row to answered.
+  saveMessage({
+    telegram_message_id: 9102,
+    chat_id: 4444,
+    chat_type: 'private',
+    chat_title: null,
+    user_id: null,
+    username: null,
+    display_name: null,
+    text: '🧹 Твоя сессия очищается (native /clear).',
+    direction: 'out',
+    is_system: true,
+    reply_to_message_id: 9101,
+    media_type: null,
+    file_path: null,
+    file_name: null,
+  });
+  assert.equal(
+    getUnansweredMessagesForUser(4444, 24).length,
+    1,
+    'system ack must NOT mark the question answered (the 86cau9ndb masking)',
+  );
+
+  // A genuine operator reply (is_system omitted → 0) DOES answer it.
+  saveMessage({
+    telegram_message_id: 9103,
+    chat_id: 4444,
+    chat_type: 'private',
+    chat_title: null,
+    user_id: null,
+    username: null,
+    display_name: 'Operator',
+    text: 'вот ответ',
+    direction: 'out',
+    reply_to_message_id: 9101,
+    media_type: null,
+    file_path: null,
+    file_name: null,
+  });
+  assert.equal(
+    getUnansweredMessagesForUser(4444, 24).length,
+    0,
+    'genuine (non-system) OUT reply answers the row',
+  );
+});
+
+// Bug 2: bumpReplayCount must return the new count so the caller can detect the
+// REPLAY_MAX cap and alert instead of silently dropping the row forever.
+test('bumpReplayCount returns the incremented count and reaches REPLAY_MAX', () => {
+  saveMessage({
+    telegram_message_id: 9201,
+    chat_id: 5555,
+    chat_type: 'private',
+    chat_title: null,
+    user_id: 5555,
+    username: 'capped',
+    display_name: 'Capped',
+    text: 'stuck at cap',
+    direction: 'in',
+    reply_to_message_id: null,
+    media_type: null,
+    file_path: null,
+    file_name: null,
+  });
+  const row = getUnansweredMessagesForUser(5555, 24).find((m) => m.telegram_message_id === 9201);
+  assert.ok(row, 'row must be present before bumping');
+
+  const counts: number[] = [];
+  for (let i = 0; i < REPLAY_MAX; i++) counts.push(bumpReplayCount(row!.id!));
+  assert.deepEqual(counts, [1, 2, 3], 'each bump returns the new monotonically-increasing count');
+  assert.equal(counts[counts.length - 1], REPLAY_MAX, 'final bump lands exactly on REPLAY_MAX (the alert trigger)');
 });
