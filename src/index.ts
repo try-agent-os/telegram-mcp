@@ -476,8 +476,8 @@ async function main() {
         // Bump replay_count so the circuit breaker in getUnansweredMessages
         // eventually stops re-surfacing this row if no OUT reply ever lands.
         // When the bump reaches REPLAY_MAX the row is about to become permanently
-        // unrecoverable — do NOT drop it silently (the second half of incident
-        // 86cau9ndb: Rita's 4 messages all stuck at replay_count=3, no alert).
+        // unrecoverable — do NOT drop it silently (the observed failure: user
+        // messages all stuck at replay_count=3 with no alert).
         // Fire a one-shot alert to the admins so a human sees the still-unanswered
         // message. Fires exactly once per row (the bump to REPLAY_MAX happens once).
         try {

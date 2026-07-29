@@ -151,9 +151,9 @@ test('unanswered: an OUT reply after the IN row answers it', () => {
   assert.equal(getUnansweredMessagesForUser(3333, 24).length, 0, 'OUT reply answers the row');
 });
 
-// Regression for incident 86cau9ndb (bug 1): a SYSTEM/ack OUT row (is_system=1,
-// e.g. the native /clear ack) must NOT count as a reply, or a real unanswered
-// question is masked as answered. A genuine (non-system) OUT reply still answers.
+// Regression (bug 1): a SYSTEM/ack OUT row (is_system=1, e.g. the native /clear
+// ack) must NOT count as a reply, or a real unanswered question is masked as
+// answered. A genuine (non-system) OUT reply still answers.
 test('unanswered: a system/ack OUT row does NOT mask a real unanswered question', () => {
   saveMessage({
     telegram_message_id: 9101,
@@ -197,7 +197,7 @@ test('unanswered: a system/ack OUT row does NOT mask a real unanswered question'
   assert.equal(
     getUnansweredMessagesForUser(4444, 24).length,
     1,
-    'system ack must NOT mark the question answered (the 86cau9ndb masking)',
+    'system ack must NOT mark the question answered (the ack masking)',
   );
 
   // A genuine operator reply (is_system omitted → 0) DOES answer it.

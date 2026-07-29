@@ -102,7 +102,7 @@ export function initDb(): void {
   // System/ack flag — OUT rows that are the bot's own acks (native /clear|/model)
   // or emergency alerts, NOT genuine operator replies. getUnansweredMessages
   // excludes these from the "was it answered?" check so a bot ack can't mask a
-  // real unanswered inbound question (the masking that hid incident 86cau9ndb).
+  // real unanswered inbound question.
   if (!colNames.includes('is_system')) {
     db.prepare(`ALTER TABLE messages ADD COLUMN is_system INTEGER NOT NULL DEFAULT 0`).run();
   }
@@ -273,8 +273,8 @@ export function getLastIncomingMessageId(chatId: number): number | null {
 // "Answered" = a NON-SYSTEM OUT row exists after the inbound row. System/ack OUT
 // rows (is_system=1: native /clear|/model acks, emergency alerts) are excluded
 // from that check — otherwise the bot's own ack marks a real unanswered question
-// as answered. That masking is exactly what hid incident 86cau9ndb: a /clear ack
-// made the user think the (dead) operator had replied.
+// as answered. That masking is what makes the failure invisible: a /clear ack
+// makes the user think the (dead) operator had replied.
 export const REPLAY_MAX = 3;
 export function getUnansweredMessages(sinceHours = 24): TelegramMessage[] {
   const hours = Math.max(1, Math.min(168, Number(sinceHours) || 24));
@@ -331,8 +331,8 @@ export function getUnansweredMessagesForUser(userId: number, sinceHours = 24): T
 // eventually stops re-surfacing the same row if the operator never produces an
 // OUT reply. The returned count lets the caller detect the moment a row reaches
 // REPLAY_MAX (about to be permanently suppressed) and alert instead of silently
-// dropping it — the second half of incident 86cau9ndb (Rita's 4 messages all
-// stuck at replay_count=3, unrecoverable, no alert).
+// dropping it — the observed failure was a batch of user messages all stuck at
+// replay_count=3, unrecoverable, with no alert.
 export function bumpReplayCount(id: number): number {
   db.prepare('UPDATE messages SET replay_count = COALESCE(replay_count, 0) + 1 WHERE id = ?').run(id);
   const row = db.prepare('SELECT replay_count FROM messages WHERE id = ?').get(id) as { replay_count: number } | undefined;
