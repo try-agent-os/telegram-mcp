@@ -1,5 +1,6 @@
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
+import { InputFile } from 'grammy';
 import type { Bot } from 'grammy';
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 
@@ -59,6 +60,70 @@ export function createTelegramMcpTools(bot: Bot, sessionChatId?: string): McpSdk
               message_id: results[0].message_id,
               chat_id: results[0].chat_id,
               chunks_sent: results.length,
+            }),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+    { annotations: { destructiveHint: false, openWorldHint: true } }
+  );
+
+  const sendDocument = tool(
+    'send_document',
+    'Send a document/file to a Telegram chat. `document` is an absolute local filesystem path (uploaded from disk — e.g. a generated DOCX/PDF report from the session working dir) or an http(s) URL. Optional caption supports Telegram HTML.',
+    {
+      chat_id: z.string().describe('Telegram chat ID (numeric string)'),
+      document: z.string().describe('Absolute path to a local file OR an http(s) URL'),
+      caption: z.string().optional().describe('Optional caption (Telegram HTML, max 1024 chars)'),
+      filename: z.string().optional().describe('Optional filename override shown to the recipient'),
+      reply_to_message_id: z.number().optional().describe('Message ID to reply to'),
+    },
+    async (args) => {
+      if (sessionChatId && args.chat_id !== sessionChatId) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: cannot send to chat ${args.chat_id} — session is scoped to chat ${sessionChatId}` }],
+          isError: true,
+        };
+      }
+      try {
+        const isUrl = /^https?:\/\//i.test(args.document);
+        let input: InputFile | string;
+        let resolvedName: string;
+        if (isUrl) {
+          input = args.document;
+          resolvedName = args.filename ?? args.document.split('/').pop()?.split('?')[0] ?? 'file';
+        } else {
+          const { existsSync, statSync } = await import('node:fs');
+          const { basename } = await import('node:path');
+          if (!existsSync(args.document) || !statSync(args.document).isFile()) {
+            return {
+              content: [{ type: 'text' as const, text: `Error: document not found or not a regular file: ${args.document}` }],
+              isError: true,
+            };
+          }
+          resolvedName = args.filename ?? basename(args.document);
+          input = new InputFile(args.document, resolvedName);
+        }
+        const opts: Record<string, unknown> = {};
+        if (args.reply_to_message_id) opts.reply_parameters = { message_id: args.reply_to_message_id };
+        if (args.caption && args.caption.length > 0) {
+          opts.caption = args.caption.slice(0, 1024);
+          opts.parse_mode = 'HTML';
+        }
+        const result = await bot.api.sendDocument(args.chat_id, input, opts);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: true,
+              message_id: result.message_id,
+              chat_id: result.chat.id,
+              file_name: resolvedName,
             }),
           }],
         };
@@ -151,6 +216,6 @@ export function createTelegramMcpTools(bot: Bot, sessionChatId?: string): McpSdk
   return createSdkMcpServer({
     name: 'telegram',
     version: '0.1.0',
-    tools: [sendMessage, getRecent, searchMessages],
+    tools: [sendMessage, sendDocument, getRecent, searchMessages],
   });
 }

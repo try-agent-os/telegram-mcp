@@ -1,5 +1,7 @@
-import { InlineKeyboard, type Bot } from 'grammy';
+import { InlineKeyboard, InputFile, type Bot } from 'grammy';
 import type { ReactionTypeEmoji } from '@grammyjs/types';
+import { existsSync, statSync } from 'node:fs';
+import { basename } from 'node:path';
 
 type ButtonSpec = { text: string; url?: string; callback?: string };
 type ButtonRows = ButtonSpec[][];
@@ -169,6 +171,26 @@ export function getToolDefinitions() {
           buttons: buttonsSchema,
         },
         required: ['chat_id', 'text'],
+      },
+    },
+    {
+      name: 'telegram_send_document',
+      description:
+        'Send a document/file to a Telegram chat. Provide `document` as either an absolute filesystem path ' +
+        '(the file is uploaded from disk — use this to send a generated DOCX/PDF/etc from the session working dir, ' +
+        'e.g. /home/<user>/claude/users/<uid>/reports/report.docx) or an http(s) URL (Telegram fetches it). ' +
+        'Optional caption supports Telegram HTML/markdown (auto-detected).',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          chat_id: { type: 'number', description: 'Telegram chat ID' },
+          document: { type: 'string', description: 'Absolute path to a local file OR an http(s) URL to send as a document' },
+          caption: { type: 'string', description: 'Optional caption (Telegram HTML/markdown, max 1024 chars)' },
+          filename: { type: 'string', description: 'Optional filename override shown to the recipient (defaults to the basename of the path/URL)' },
+          reply_to_message_id: { type: 'number', description: 'Message ID to reply to (optional)' },
+          parse_mode: { type: 'string', enum: ['HTML', 'MarkdownV2'], description: 'Caption parse mode (optional; HTML auto-applied when caption has markdown/HTML tags)' },
+        },
+        required: ['chat_id', 'document'],
       },
     },
     {
@@ -400,6 +422,53 @@ export async function handleToolCall(bot: Bot, name: string, args: Record<string
       });
       recordOutgoing(chat_id, sent.message_id, reply_to_message_id ?? null);
       return { message_id: sent.message_id, chat_id, date: new Date(sent.date * 1000).toISOString() };
+    }
+
+    case 'telegram_send_document': {
+      const { chat_id, document, caption, filename, reply_to_message_id, parse_mode } = args as {
+        chat_id: number; document: string; caption?: string; filename?: string;
+        reply_to_message_id?: number; parse_mode?: string;
+      };
+      const isUrl = /^https?:\/\//i.test(document);
+      let input: InputFile | string;
+      let resolvedName: string;
+      if (isUrl) {
+        input = document;
+        resolvedName = filename ?? document.split('/').pop()?.split('?')[0] ?? 'file';
+      } else {
+        if (!existsSync(document) || !statSync(document).isFile()) {
+          throw new Error(`Document not found or not a regular file: ${document}`);
+        }
+        resolvedName = filename ?? basename(document);
+        input = new InputFile(document, resolvedName);
+      }
+      const opts: Record<string, unknown> = {
+        reply_parameters: reply_to_message_id ? { message_id: reply_to_message_id } : undefined,
+      };
+      if (caption && caption.length > 0) {
+        // Telegram caption hard limit is 1024 chars.
+        const prepared = prepareOutgoing(caption.slice(0, 1024), parse_mode);
+        opts.caption = prepared.text.slice(0, 1024);
+        if (prepared.parse_mode) opts.parse_mode = prepared.parse_mode;
+      }
+      const sent = await bot.api.sendDocument(chat_id, input, opts);
+      saveMessage({
+        telegram_message_id: sent.message_id,
+        chat_id,
+        chat_type: null,
+        chat_title: null,
+        user_id: null,
+        username: null,
+        display_name: 'Bot',
+        text: caption ?? `[document: ${resolvedName}]`,
+        direction: 'out',
+        reply_to_message_id: reply_to_message_id ?? null,
+        media_type: 'document',
+        file_path: isUrl ? null : document,
+        file_name: resolvedName,
+      });
+      recordOutgoing(chat_id, sent.message_id, reply_to_message_id ?? null);
+      return { message_id: sent.message_id, chat_id, file_name: resolvedName, date: new Date(sent.date * 1000).toISOString() };
     }
 
     case 'telegram_send_rich_message': {
