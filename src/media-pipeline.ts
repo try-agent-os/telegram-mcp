@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync, readdirSync, unlinkSync, openAsBlob } from 'fs';
+import { mkdirSync, readdirSync, unlinkSync, openAsBlob, existsSync } from 'fs';
 import { stat, readFile } from 'fs/promises';
 import path from 'path';
 import { nodewhisper } from 'nodejs-whisper';
@@ -32,11 +32,41 @@ const execFileP = promisify(execFile);
 //   WHISPER_SERVER_URL      base URL of a running whisper-server (local server backend)
 //   WHISPER_MODEL           local model name for whisper-cli (default "medium")
 //   TELEGRAM_MCP_MEDIA_DIR  scratch dir for extracted audio (default /tmp/telegram-mcp)
+//   YT_DLP_COOKIES          path to a Netscape-format cookie jar for yt-dlp (empty → cookieless)
 // ---------------------------------------------------------------------------
 
 const MEDIA_DIR = process.env.TELEGRAM_MCP_MEDIA_DIR ?? '/tmp/telegram-mcp';
 const WHISPER_MODEL = process.env.WHISPER_MODEL ?? 'medium';
 const WHISPER_SERVER_URL = process.env.WHISPER_SERVER_URL ?? '';
+
+// ---------------------------------------------------------------------------
+// yt-dlp cookies (IP-gated sites)
+// ---------------------------------------------------------------------------
+// From a datacenter IP (e.g. the Hetzner hub) Instagram and YouTube refuse
+// link-only downloads without an authenticated session ("empty media response
+// ... use --cookies" / "Sign in to confirm you're not a bot"). Point
+// YT_DLP_COOKIES at a Netscape-format cookie jar exported from a logged-in
+// browser (Vasily's accounts) — store it in the state dir alongside the whisper
+// model. Empty or a missing file → yt-dlp runs cookieless: the native-video
+// path (Telegram attaches the reel as a video) is unaffected; only link-only
+// forwards from gated sites need the jar.
+const YT_DLP_COOKIES = process.env.YT_DLP_COOKIES ?? '';
+let cookieWarned = false;
+
+// Returns yt-dlp cookie args (`['--cookies', <file>]`) when YT_DLP_COOKIES points
+// at an existing file, else `[]`. A configured-but-missing path is logged once so
+// a misconfiguration is visible, while an intentionally cookieless setup stays quiet.
+function ytDlpCookieArgs(): string[] {
+  if (!YT_DLP_COOKIES) return [];
+  if (!existsSync(YT_DLP_COOKIES)) {
+    if (!cookieWarned) {
+      console.error(`[yt-dlp] YT_DLP_COOKIES set but file not found: ${YT_DLP_COOKIES} — running cookieless`);
+      cookieWarned = true;
+    }
+    return [];
+  }
+  return ['--cookies', YT_DLP_COOKIES];
+}
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? '';
 const OPENAI_API_BASE = (process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1').replace(/\/$/, '');
@@ -255,6 +285,7 @@ async function fetchMetadata(url: string): Promise<UrlMetadata | null> {
       '--quiet',
       '--no-warnings',
       '--skip-download',
+      ...ytDlpCookieArgs(),
       '--print', '%(title)s\n%(uploader,channel,uploader_id)s\n%(duration)s',
       url,
     ], { timeout: 30000 });
@@ -510,6 +541,7 @@ async function downloadAndTranscribeAudio(url: string, prefix: string): Promise<
     '--max-filesize', MAX_FILESIZE,
     '--no-playlist',
     '--no-warnings',
+    ...ytDlpCookieArgs(),
     '-o', outputTemplate,
     url,
   ], { timeout: 180000 });
@@ -531,6 +563,7 @@ async function downloadVideo(url: string, prefix: string): Promise<string | null
       '--max-filesize', MAX_VIDEO_FILESIZE,
       '--no-playlist',
       '--no-warnings',
+      ...ytDlpCookieArgs(),
       '--merge-output-format', 'mp4',
       '-o', outputTemplate,
       url,
