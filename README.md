@@ -53,6 +53,7 @@ Selection is token-driven: set `OPENAI_API_KEY` to send audio to the OpenAI clou
 | `WHISPER_SERVER_URL` | whisper-server | base URL of a running [whisper-server](https://github.com/ggerganov/whisper.cpp) (model resident in RAM) |
 | `WHISPER_MODEL` | whisper-cli | local whisper.cpp model name, default `medium` |
 | `TELEGRAM_MCP_MEDIA_DIR` | all | scratch dir for extracted audio, default `/tmp/telegram-mcp` |
+| `YT_DLP_COOKIES` | yt-dlp | path to a Netscape-format cookie jar for `yt-dlp`; needed for link-only forwards from IP-gated sites (Instagram/YouTube reject datacenter IPs). Empty or missing file → cookieless (native-video path unaffected) |
 
 For the local `whisper-cli` backend you also need `cmake` and the whisper `medium` model. See [SETUP.md](SETUP.md) for the full install (including the launchd plist for running as a user agent on macOS).
 
