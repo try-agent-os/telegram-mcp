@@ -12,8 +12,17 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { isOperatorRequestEnabled, operatorRequest } from './operator-request.js';
 
 const execFileP = promisify(execFile);
+
+// /login is configured when EITHER transport is available: the sandbox-safe
+// request-file transport (OPERATOR_REQUEST_DIR) OR the legacy host login-pipe
+// script (CLAUDE_LOGIN_PIPE). The consumer owns operator-liveness in the
+// request path, so the bot no longer needs tmux/sudo access.
+function loginConfigured(): boolean {
+  return isOperatorRequestEnabled() || SCRIPT.length > 0;
+}
 
 // CLAUDE_LOGIN_PIPE: host-side login-pipe script. The /login flow is disabled
 // when unset — deployments that want it must point this at their script.
@@ -92,9 +101,27 @@ export interface StartFailure {
 }
 
 export async function startLogin(chatId: number): Promise<StartResult | StartFailure> {
-  if (!SCRIPT) {
-    return { ok: false, error: '/login is not configured: set CLAUDE_LOGIN_PIPE to the host login-pipe script' };
+  if (!loginConfigured()) {
+    return { ok: false, error: '/login is not configured: set OPERATOR_REQUEST_DIR (request transport) or CLAUDE_LOGIN_PIPE (legacy)' };
   }
+
+  // Request-file transport: the host consumer runs cancel+ensure-operator+start
+  // and returns the OAuth URL. The bot touches no tmux/sudo/host script.
+  if (isOperatorRequestEnabled()) {
+    clearPending(chatId);
+    const r = await operatorRequest('login-start', { timeoutMs: 75_000 });
+    if (!r.ok) return { ok: false, error: r.error ?? 'login-start failed' };
+    if (!r.url) return { ok: false, error: 'login consumer returned no URL' };
+    const timer = setTimeout(() => {
+      pending.delete(chatId);
+      operatorRequest('login-cancel', { timeoutMs: 12_000 }).catch(() => { /* fire and forget */ });
+      console.log(`[login-flow] chat ${chatId} login timed out after 5min`);
+    }, LOGIN_TIMEOUT_MS);
+    pending.set(chatId, { startedAt: Date.now(), timer });
+    return { ok: true, url: r.url, operatorRestarted: !!r.restarted };
+  }
+
+  // Legacy fallback: direct exec of the host login-pipe script.
   // Kill any prior session in case of stale state from a previous attempt.
   clearPending(chatId);
   try {
@@ -136,12 +163,20 @@ export interface SubmitFailure {
 }
 
 export async function submitLogin(chatId: number, code: string): Promise<SubmitResult | SubmitFailure> {
-  if (!SCRIPT) {
-    return { ok: false, error: '/login is not configured: set CLAUDE_LOGIN_PIPE to the host login-pipe script' };
+  if (!loginConfigured()) {
+    return { ok: false, error: '/login is not configured: set OPERATOR_REQUEST_DIR (request transport) or CLAUDE_LOGIN_PIPE (legacy)' };
   }
   if (!pending.has(chatId)) {
     return { ok: false, error: 'no active login session — start with /login first' };
   }
+
+  // Request-file transport: the consumer pastes the code and verifies rotation.
+  if (isOperatorRequestEnabled()) {
+    const r = await operatorRequest('login-submit', { arg: code, timeoutMs: 75_000 });
+    clearPending(chatId);
+    return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'login-submit failed' };
+  }
+
   try {
     // 70s: the script retry-polls up to LOGIN_VERIFY_SEC (~40s) for credentials
     // to rotate after the code is pasted, replacing a one-shot check.
@@ -160,6 +195,10 @@ export async function submitLogin(chatId: number, code: string): Promise<SubmitR
 
 export async function cancelLogin(chatId: number): Promise<void> {
   clearPending(chatId);
+  if (isOperatorRequestEnabled()) {
+    await operatorRequest('login-cancel', { timeoutMs: 12_000 }).catch(() => { /* ignore */ });
+    return;
+  }
   if (!SCRIPT) return;
   try {
     await execFileP(SCRIPT, ['cancel']);

@@ -20,6 +20,7 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { isOperatorRequestEnabled, operatorRequest } from './operator-request.js';
 
 const execFileP = promisify(execFile);
 
@@ -28,9 +29,13 @@ function injectScript(): string {
   return (process.env.OPERATOR_MODEL_INJECT_SCRIPT ?? '').trim();
 }
 
-/** Is the /model inject feature configured on this host? */
+/**
+ * Is the /model inject feature configured on this host? Either transport counts:
+ * the new request-file transport (OPERATOR_REQUEST_DIR, sandbox-safe) OR the
+ * legacy direct-exec inject script.
+ */
 export function isModelConfigured(): boolean {
-  return injectScript().length > 0;
+  return isOperatorRequestEnabled() || injectScript().length > 0;
 }
 
 // Button set for the bare `/model` picker. Aliases verified against the installed
@@ -115,9 +120,16 @@ export async function handleModelSwitch(alias: string): Promise<ModelSwitchResul
   if (!isValidModelAlias(alias)) {
     return { ok: false, error: `invalid model alias: ${alias}` };
   }
+  // Preferred path: hand off via a request file the host consumer executes. The
+  // alias was already charset-validated above; the consumer re-validates too.
+  if (isOperatorRequestEnabled()) {
+    const r = await operatorRequest('model', { arg: alias, timeoutMs: 12_000 });
+    return { ok: r.ok, error: r.error };
+  }
+  // Legacy fallback: direct exec of the host inject script (pre-migration units).
   const script = injectScript();
   if (!script) {
-    return { ok: false, error: 'OPERATOR_MODEL_INJECT_SCRIPT is not set — /model inject is not configured on this host' };
+    return { ok: false, error: 'neither OPERATOR_REQUEST_DIR nor OPERATOR_MODEL_INJECT_SCRIPT is set — /model is not configured on this host' };
   }
   try {
     const { stdout, stderr } = await execFileP(script, [alias], {
