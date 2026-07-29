@@ -13,6 +13,12 @@ export interface TelegramMessage {
   display_name: string | null;
   text: string | null;
   direction: 'in' | 'out';
+  // System/ack OUT rows (native /clear|/model acks, emergency alerts). These are
+  // NOT genuine operator replies to an inbound message, so getUnansweredMessages
+  // must NOT treat them as an answer (else a bot ack masks a real unanswered
+  // question). Optional — plain inbound rows and genuine operator replies omit it
+  // (defaults to 0). See db.ts NOT EXISTS filter.
+  is_system?: boolean;
   reply_to_message_id: number | null;
   media_type: MediaType | null;
   file_path: string | null;
