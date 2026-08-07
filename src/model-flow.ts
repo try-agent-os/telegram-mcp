@@ -39,10 +39,12 @@ export function isModelConfigured(): boolean {
 }
 
 // Button set for the bare `/model` picker. Aliases verified against the installed
-// claude CLI 2026-07-05 (each accepted via `claude --model <alias> -p`). Fable
-// keeps the [1m] 1M-context variant — plain claude-fable-5 would shrink the
-// window to 200k under a live large context.
+// claude CLI 2026-08-07 (each accepted via `claude --model <alias> -p`). Opus 5
+// is the operator default (systemd unit pins claude-opus-5[1m]) and leads the
+// list. The [1m] 1M-context variant matters on the Opus/Fable entries — a plain
+// alias would shrink the window to 200k under a live large context.
 export const MODEL_CHOICES: ReadonlyArray<{ label: string; alias: string }> = [
+  { label: 'Opus 5 (default)', alias: 'claude-opus-5[1m]' },
   { label: 'Fable 5', alias: 'claude-fable-5[1m]' },
   { label: 'Opus 4.8', alias: 'claude-opus-4-8[1m]' },
   { label: 'Sonnet 5', alias: 'claude-sonnet-5' },
