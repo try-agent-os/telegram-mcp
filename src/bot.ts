@@ -1,6 +1,6 @@
 import { Bot, Context } from 'grammy';
 import type { Message, MessageEntity, MessageOrigin } from '@grammyjs/types';
-import { createWriteStream, mkdirSync } from 'fs';
+import { createWriteStream, mkdirSync, chmodSync } from 'fs';
 import https from 'https';
 import path from 'path';
 import { checkAccess, touchUser } from './access.js';
@@ -99,9 +99,18 @@ export function onCallbackQuery(cb: typeof callbackCallback): void {
 
 function ensureMediaDir(): void {
   try {
-    mkdirSync(MEDIA_DIR, { recursive: true });
+    mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
   } catch {
     // already exists
+  }
+  // Enforce owner-only perms even if the dir pre-existed world-readable:
+  // mkdir's mode is masked by umask and skipped entirely when the dir exists,
+  // so a store created 0755 (as the leaked doc_1381 dir was) stays readable
+  // to every local user without this explicit chmod.
+  try {
+    chmodSync(MEDIA_DIR, 0o700);
+  } catch {
+    // best-effort; not fatal
   }
 }
 
@@ -125,6 +134,15 @@ async function downloadFile(token: string, fileId: string, destFileName: string)
       file.on('finish', () => { file.close(); resolve(); });
     }).on('error', reject);
   });
+
+  // Documents sent to the bot may carry secrets (e.g. a pasted .env fragment —
+  // this is exactly how doc_1381 leaked three live credentials world-readable).
+  // Keep every downloaded file owner-only regardless of the process umask.
+  try {
+    chmodSync(destPath, 0o600);
+  } catch {
+    // best-effort; not fatal
+  }
 
   return destPath;
 }
