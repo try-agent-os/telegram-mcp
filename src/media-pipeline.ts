@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdirSync, readdirSync, unlinkSync, openAsBlob, existsSync } from 'fs';
+import { mkdirSync, readdirSync, unlinkSync, openAsBlob, existsSync, chmodSync } from 'fs';
 import { stat, readFile } from 'fs/promises';
 import path from 'path';
 import { nodewhisper } from 'nodejs-whisper';
@@ -131,9 +131,15 @@ function resolveBackend(): TranscriptionBackend {
 
 function ensureMediaDir(): void {
   try {
-    mkdirSync(MEDIA_DIR, { recursive: true });
+    mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
   } catch {
     // exists
+  }
+  // Owner-only, even if the dir pre-existed world-readable (see bot.ts).
+  try {
+    chmodSync(MEDIA_DIR, 0o700);
+  } catch {
+    // best-effort; not fatal
   }
 }
 
