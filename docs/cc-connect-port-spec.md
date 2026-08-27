@@ -12,7 +12,7 @@ cc-connect README shows MIT badge but **no LICENSE file in repo**. All patterns 
 
 ## Pattern #1: Honest Permission Flow via `canUseTool`
 
-**ClickUp**: https://app.clickup.com/t/86c9wxhxy
+**Tracking**: internal tracker
 **Priority**: High — fixes "bypassPermissions everywhere" security gap
 
 ### Current State
@@ -108,7 +108,7 @@ async function promptPermission(chatId: number, req: PermissionRequest): Promise
 
 ## Pattern #2: Per-Chat SessionKey with Forum-Aware Logic
 
-**ClickUp**: https://app.clickup.com/t/86c9wxhy2
+**Tracking**: internal tracker
 **Priority**: High — prerequisite for patterns #1 and #3, fixes architect review critical
 
 ### Current State
@@ -199,7 +199,7 @@ function getBaseFields(msg: Message) {
 
 ## Pattern #3: Idle Reset + 3-Phase Graceful Shutdown
 
-**ClickUp**: https://app.clickup.com/t/86c9wxhy8
+**Tracking**: internal tracker
 **Priority**: High — prevents orphan processes and stale context
 
 ### Current State
@@ -293,7 +293,7 @@ class SessionManager {
 
 ## Pattern #4: Bridge Protocol v0 Spec
 
-**ClickUp**: https://app.clickup.com/t/86c9wxhyc
+**Tracking**: internal tracker
 **Priority**: Normal — future architecture, spec only now
 
 ### cc-connect Reference
@@ -330,7 +330,7 @@ To be written as `docs/bridge-protocol-v0.md`. Key decisions:
 
 ## Pattern #5: `run_as_user` OS-Level Multi-Tenant Isolation
 
-**ClickUp**: https://app.clickup.com/t/86c9wxhyg
+**Tracking**: internal tracker
 **Priority**: Normal — needed for AgentOS-as-a-service, spec only now
 
 ### cc-connect Reference
